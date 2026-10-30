@@ -1,0 +1,12 @@
+# 临时与编译生成文件
+*.bak
+*.bak*
+*.old
+*.spec
+build/
+dist/
+__pycache__/
+*.pyc
+
+# 如需将EXE文件发布到 Release，可忽略本地体积较大的 EXE
+# *.exe
