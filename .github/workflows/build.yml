@@ -35,13 +35,14 @@ jobs:
         run: |
           python protect_build.py
 
-      - name: 检查生成的受保护二进制文件
+      - name: 检查并准备发布文件
         run: |
           dir dist\
           if (-not (Test-Path "dist\展馆系统配置与网络设置及电脑优化工具.exe")) {
             Write-Error "构建输出文件未找到！"
             exit 1
           }
+          Copy-Item "dist\展馆系统配置与网络设置及电脑优化工具.exe" -Destination "dist\Museum_Config_Tool.exe"
 
       - name: 上传构建成果物 (Artifacts)
         uses: actions/upload-artifact@v4
@@ -71,5 +72,7 @@ jobs:
             3. 在软件中粘贴激活码完成即刻解锁与绑定。
           files: |
             dist/展馆系统配置与网络设置及电脑优化工具.exe
+            dist/Museum_Config_Tool.exe
           draft: false
           prerelease: false
+
