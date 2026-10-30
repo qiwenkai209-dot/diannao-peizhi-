@@ -13,6 +13,14 @@ import sys
 import subprocess
 import time
 
+# 兼容 Windows 控制台 UTF-8 输出，防止 emoji 或中文在 gbk 终端下抛出编码异常
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 def ensure_dependencies():
     """检测并安装必要的打包依赖"""
     try:
@@ -29,7 +37,7 @@ def main():
     icon_path = os.path.join(base_dir, "gear.ico")
 
     print("=" * 65)
-    print("🛡️  国文创通用加壳加密引擎 · 自动化构建流水线")
+    print("[*] 国文创通用加壳加密引擎 · 自动化构建流水线")
     print("=" * 65)
     print(f"[*] 源码入口: {src_file}")
     print(f"[*] 输出路径: {output_dir}")
@@ -66,7 +74,7 @@ def main():
         target_path = result.get("path")
         file_size_mb = os.path.getsize(target_path) / (1024 * 1024)
         print("=" * 65)
-        print("✅ 加壳加密构建圆满完成！")
+        print("[+] 加壳加密构建圆满完成！")
         print(f"[*] 生成路径: {target_path}")
         print(f"[*] 文件大小: {file_size_mb:.2f} MB")
         print(f"[*] 耗时统计: {elapsed:.2f} 秒")
@@ -80,7 +88,7 @@ def main():
         return 0
     else:
         print("=" * 65)
-        print(f"❌ 加壳构建失败: {result.get('error')}")
+        print(f"[-] 加壳构建失败: {result.get('error')}")
         print("=" * 65)
         return 1
 

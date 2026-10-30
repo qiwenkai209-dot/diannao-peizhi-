@@ -17,6 +17,14 @@ import hashlib
 import hmac
 import shutil
 import subprocess
+import time
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 def derive_keystream(key: bytes, length: int) -> bytes:
     """使用 HMAC-SHA256 计数器模式派生与明文等长的高强度伪随机密钥流 (CTR 模式)"""
@@ -553,7 +561,7 @@ class UniversalShieldEngine:
         cmd.append(boot_file_path)
 
         print(f"[*] 正在调用 PyInstaller 进行根级二进制编译: {' '.join(cmd)}")
-        res = subprocess.run(cmd, cwd=build_temp_dir, capture_output=True, text=True)
+        res = subprocess.run(cmd, cwd=build_temp_dir, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         dist_exe_path = os.path.join(build_temp_dir, "dist", f"{actual_exe_title}.exe")
         if os.path.exists(dist_exe_path):
