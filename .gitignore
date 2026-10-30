@@ -7,6 +7,15 @@ build/
 dist/
 __pycache__/
 *.pyc
+*.enc
+.*_lic.dat
+__armor_build_*
+__build_cache_*
 
-# 如需将EXE文件发布到 Release，可忽略本地体积较大的 EXE
-# *.exe
+# 临时参考文件
+armor_studio_ref.py
+
+# 二进制可执行文件 (通过 GitHub Actions 云端构建并发布至 Release/Artifacts)
+*.exe
+
+
