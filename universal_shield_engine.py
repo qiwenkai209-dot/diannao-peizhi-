@@ -328,7 +328,12 @@ def show_license_gui(lm):
         else:
             messagebox.showerror("激活失败", f"❌ {msg}")
 
-    tk.Button(card, text="⚡ 立即验证激活并启动", font=("Microsoft YaHei UI", 11, "bold"), bg="#2563eb", fg="#fff", activebackground="#1d4ed8", bd=0, pady=8, cursor="hand2", command=do_act).pack(fill=tk.X, padx=16, pady=16)
+    def do_remote():
+        res_box[0] = True
+        root.destroy()
+
+    tk.Button(card, text="⚡ 立即验证激活并启动", font=("Microsoft YaHei UI", 11, "bold"), bg="#2563eb", fg="#fff", activebackground="#1d4ed8", bd=0, pady=8, cursor="hand2", command=do_act).pack(fill=tk.X, padx=16, pady=(14, 6))
+    tk.Button(card, text="📡 启动从机 (等待中控远程授权) / 启动主控管理", font=("Microsoft YaHei UI", 9), bg="#059669", fg="#fff", activebackground="#047857", bd=0, pady=6, cursor="hand2", command=do_remote).pack(fill=tk.X, padx=16, pady=(0, 12))
 
     root.mainloop()
     return res_box[0]
@@ -340,9 +345,7 @@ def bootstrap():
         activated = show_license_gui(lm)
         if not activated:
             sys.exit(0)
-        ok, msg = lm.check()
-        if not ok:
-            sys.exit(0)
+        # 允许进入从机等待主控远程授权或启动主控
 
     lm.record_run()
 
@@ -402,6 +405,7 @@ def bootstrap():
     if entry_code:
         main_mod = types.ModuleType("__main__")
         main_mod.__file__ = os.path.join(base_dir, "@@ENTRY_FILE_NAME@@")
+        main_mod.__dict__["__GWC_LICENSE_MGR__"] = lm
         sys.modules["__main__"] = main_mod
         exec(entry_code, main_mod.__dict__)
     else:
@@ -545,6 +549,11 @@ class UniversalShieldEngine:
             "--onefile",
             "--name", actual_exe_title,
             "--add-data", f"{payload_filename};.",
+            "--hidden-import", "PIL",
+            "--hidden-import", "PIL.Image",
+            "--hidden-import", "PIL.ImageTk",
+            "--hidden-import", "PIL.ImageGrab",
+            "--hidden-import", "psutil",
         ]
 
         if uac_admin:

@@ -2,7 +2,7 @@
 """
 国文创系统 · 一键加壳加密与安全构建脚本 (Protect & Build)
 =========================================================
-1. 提取 net_config_tool.py 源码编译为高强度混淆加密 Bytecode
+1. 提取 net_config_tool.py 及全部功能模块源码编译为高强度混淆加密 Bytecode
 2. 注入动态防二次激活商业授权守卫 (一机一码 + 动态 Nonce + 随机申请码)
 3. 驱动 PyInstaller 编译为原生独立 EXE (Windows UAC 管理员提权 + 专属齿轮图标)
 4. 输出至 dist/ 目录，支持本地与 GitHub Actions 云端流水线全自动执行
@@ -23,23 +23,30 @@ if sys.platform == "win32":
 
 def ensure_dependencies():
     """检测并安装必要的打包依赖"""
-    try:
-        import PyInstaller
-    except ImportError:
-        print("[*] 正在安装 PyInstaller 打包套件...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+    required = [("PyInstaller", "pyinstaller"), ("PIL", "pillow"), ("psutil", "psutil")]
+    missing = []
+    for mod_name, pkg_name in required:
+        try:
+            __import__(mod_name)
+        except ImportError:
+            missing.append(pkg_name)
+
+    if missing:
+        print(f"[*] 正在安装依赖套件: {' '.join(missing)} ...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
 
 def main():
     start_time = time.time()
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    src_file = os.path.join(base_dir, "net_config_tool.py")
+    entry_file = "net_config_tool.py"
     output_dir = os.path.join(base_dir, "dist")
     icon_path = os.path.join(base_dir, "gear.ico")
 
     print("=" * 65)
     print("[*] 国文创通用加壳加密引擎 · 自动化构建流水线")
     print("=" * 65)
-    print(f"[*] 源码入口: {src_file}")
+    print(f"[*] 项目根目录: {base_dir}")
+    print(f"[*] 源码主入口: {entry_file}")
     print(f"[*] 输出路径: {output_dir}")
     print(f"[*] 应用图标: {icon_path if os.path.exists(icon_path) else '使用系统默认'}")
 
@@ -57,8 +64,8 @@ def main():
     print(f"[*] 开始进行 AST 编译、HMAC 密钥流加壳与 PyInstaller 独立封装...")
 
     result = UniversalShieldEngine.pack_and_protect_project(
-        project_dir_or_file=src_file,
-        entry_file_name="net_config_tool.py",
+        project_dir_or_file=base_dir,
+        entry_file_name=entry_file,
         output_dir=output_dir,
         product_id=product_id,
         product_name=product_name,

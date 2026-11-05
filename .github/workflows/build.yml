@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build-and-encrypt:
-    name: 🛡️ 国文创加壳加密与打包构建
+    name: 🛡️ 国文创加壳加密与双模构建
     runs-on: windows-latest
 
     steps:
@@ -26,10 +26,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
+      - name: Install PyInstaller and Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller psutil pillow
 
       - name: 执行国文创加壳加密构建 (Protect & Build)
         run: |
@@ -47,7 +47,7 @@ jobs:
       - name: 上传构建成果物 (Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: 展馆系统配置与网络设置及电脑优化工具-国文创加密版
+          name: 展馆系统配置与网络设置及电脑优化工具-国文创双模版
           path: dist/展馆系统配置与网络设置及电脑优化工具.exe
           if-no-files-found: error
           retention-days: 30
@@ -56,23 +56,33 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.0.0' }}
-          name: 展馆系统配置与网络设置及电脑优化工具 (国文创商业授权版)
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v2.0.0' }}
+          name: 展馆系统配置与网络设置及电脑优化工具 v2.0 (双模工控中控版)
           body: |
-            ## 🛡️ 展馆系统配置与网络设置及电脑优化工具 · 国文创商业授权版
+            ## 🏛️ 展馆系统配置与网络设置及电脑优化工具 · 国文创商业双模版 v2.0
 
-            ### 📦 本次构建说明：
-            - **源码保护**：代码已通过国文创商业加壳加密引擎（Universal Shield Engine）混淆加密，内存动态解密执行。
-            - **授权体系**：集成动态 8 位申请码与一机一码防二次激活机制，100% 兼容《国文创加密机.exe》。
-            - **权限配置**：内置 Windows 管理员 UAC 自动提权，全功能支持网络修复、内存深清、启动项及右键菜单管理。
+            ### 🌟 本次全新升级特性：
+            1. **双功能架构 (单机优化 + 主控综合管理)**：
+               - **工控单机模式**：网络适配器 IPv4 配置、展馆策略全套管控 (ALLON/ALLOFF)、内存深度清空释放、网络深度重置、启动项/右键管理。
+               - **主控综合管理模式**：多机集中监控看板，实时掌握全展馆工控机状态。
+            2. **系统一键备份与恢复**：
+               - 单机支持完整导出系统配置、策略、启动项及预装软件环境为 `.gwcbackup` 备份包，支持一键还原恢复。
+               - 备份包支持实时上传至主控集中存储归档；主控支持一键向单机或批量工控机下发备份并自动触发还原！
+            3. **嵌入开源 VNC 远程控制与双向文件传输**：
+               - 内置标准 VNC RFB 3.8 服务 (支持 UltraVNC/TightVNC/RealVNC 直连 5900 端口)。
+               - 主控端提供原生内嵌远程桌面控制窗口与双栏文件管理器，流畅实现远程桌面操作与大文件跨机互传！
+            4. **实时状态监控与中控全权调度**：
+               - 从机定时上报 CPU、内存、磁盘占用、实时网络速率、当前前台活动窗口及运行中的软件进程。
+               - 主控端支持远程一键关机、远程重启、精准音量控制 (数值调节/静音)、远程应用调用启动、远程异常进程强制结束 (Kill)。
+            5. **国文创加密机通信与远程免密授权**：
+               - 主从机所有 TCP 指令、心跳数据、文件互传均通过国文创 HMAC-SHA256 CTR 流式加密机全包加密。
+               - 从机支持将 8 位申请码上报主控，主控管理员在监控大厅可【一键远程签发并激活】，从机即刻核销解锁，免除现场逐机手工输入的繁琐！
 
-            ### 🔑 激活指引：
-            1. 首次运行软件，弹出【商业授权验证中心】并显示 8 位设备申请码。
-            2. 使用《国文创加密机.exe》输入申请码，签发 12 位激活码。
-            3. 在软件中粘贴激活码完成即刻解锁与绑定。
+            ### 📦 发布文件说明：
+            - `展馆系统配置与网络设置及电脑优化工具.exe`: 原生单文件受保护可执行程序 (内置管理员 UAC 提权)。
+            - `Museum_Config_Tool.exe`: 英文命名兼容副本。
           files: |
             dist/展馆系统配置与网络设置及电脑优化工具.exe
             dist/Museum_Config_Tool.exe
           draft: false
           prerelease: false
-
