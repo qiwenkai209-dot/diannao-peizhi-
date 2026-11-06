@@ -69,29 +69,43 @@ class GwcMasterHub:
             self.backup_store_dir = backup_store_dir
         os.makedirs(self.backup_store_dir, exist_ok=True)
 
-        # 展馆第三方智能中控 UDP 调度监听接口 (默认端口 9889)
+        # 展馆第三方智能中控多协议总线调度监听接口 (UDP:9889 | TCP:9890 | HTTP API:9891 | 串口COM)
         self.udp_control_port = 9889
+        self.tcp_control_port = 9890
+        self.http_control_port = 9891
+        self.serial_port_name = ""
+        self.serial_baudrate = 9600
+
         self.udp_controller = UdpCentralControlListener(self, port=self.udp_control_port)
-        self.on_udp_command_received = None
+        self.tcp_controller = TcpCentralControlListener(self, port=self.tcp_control_port)
+        self.http_controller = HttpCentralControlServer(self, port=self.http_control_port)
+        self.serial_controller = SerialCentralControlListener(self)
+
+        self.on_central_control_event = None
+        self.on_udp_command_received = None  # 兼容旧回调属性
 
     def start(self):
-        """启动主控监听服务 (TCP 集群监听 + 外部智能中控 UDP 调度服务)"""
+        """启动主控监听服务 (TCP 集群监听 + 外部智能中控全协议 UDP/TCP/HTTP 调度服务)"""
         if self.running:
             return
         self.running = True
         self._server_thread = threading.Thread(target=self._server_listen_loop, daemon=True)
         self._server_thread.start()
 
-        # 启动外部智能中控 UDP 调度监听器
-        self.udp_controller.on_command_received = self._on_udp_ctl_received
+        # 启动外部智能中控 UDP/TCP/HTTP 调度总线
         self.udp_controller.start()
+        self.tcp_controller.start()
+        self.http_controller.start()
 
-        print(f"[*] 国文创主控综合管理集群服务已启动: TCP 监听端口 {self.port} | 中控 UDP 接口 {self.udp_control_port}")
+        print(f"[*] 展馆智能集群管控中枢已就绪: 集群通信 TCP {self.port} | 中控总线 UDP {self.udp_control_port} | TCP {self.tcp_control_port} | HTTP {self.http_control_port}")
 
     def stop(self):
         """停止主控服务"""
         self.running = False
         self.udp_controller.stop()
+        self.tcp_controller.stop()
+        self.http_controller.stop()
+        self.serial_controller.stop()
         if self.server_sock:
             try:
                 self.server_sock.close()
@@ -106,7 +120,7 @@ class GwcMasterHub:
             self.clients.clear()
 
     def get_online_clients(self) -> list:
-        """获取所有当前在线的从机列表"""
+        """获取所有当前在线的从机列表 (完整携带视频推流监看地址与 API 控制接口)"""
         with self.clients_lock:
             result = []
             for ip, c in self.clients.items():
@@ -114,6 +128,7 @@ class GwcMasterHub:
                 result.append({
                     "ip": ip,
                     "hostname": info.get("hostname", "Unknown"),
+                    "custom_name": info.get("custom_name", ""),
                     "os": info.get("os", "Windows"),
                     "cpu_percent": info.get("cpu_percent", 0),
                     "gpu_percent": info.get("gpu_percent", 0),
@@ -124,7 +139,13 @@ class GwcMasterHub:
                     "top_processes": info.get("top_processes", []),
                     "preset_apps": info.get("preset_apps", []),
                     "license": info.get("license", {}),
-                    "last_seen": c.get("last_seen", 0)
+                    "last_seen": c.get("last_seen", 0),
+                    # 视频推流地址与 API 接口规范
+                    "vnc_url": f"vnc://{ip}:5900",
+                    "webrtc_url": f"webrtc://{ip}:5900/live",
+                    "stream_url": f"http://{ip}:5901/stream.mjpg",
+                    "rtsp_url": f"rtsp://{ip}:8554/live",
+                    "api_url": f"http://{ip}:9891/api/devices"
                 })
             return result
 
@@ -418,16 +439,186 @@ class GwcMasterHub:
                 pass
 
 
-# ==================== 展馆第三方集中智能中控 UDP 调度接口 ====================
+# ==================== 展馆第三方集中智能中控多协议总线 (UDP/TCP/HTTP/串口) ====================
 UDP_CENTRAL_CONTROL_PORT = 9889
+TCP_CENTRAL_CONTROL_PORT = 9890
+HTTP_CENTRAL_CONTROL_PORT = 9891
+
+
+class CentralControlDispatcher:
+    """
+    展馆第三方集中智能中控核心指令解析与调度总线
+    统一驱动 UDP、TCP、HTTP REST API、物理串口 (RS232/RS485)
+    """
+    @staticmethod
+    def dispatch(master_hub, cmd_raw: str, protocol_name: str = "UDP", client_addr: str = "") -> dict:
+        cmd_raw = (cmd_raw or "").strip()
+        if not cmd_raw:
+            return {"status": "ERROR", "code": 400, "error": "空指令报文"}
+
+        resp_data = {"status": "SUCCESS", "code": 200, "protocol": protocol_name, "timestamp": int(time.time())}
+        cmd_name = ""
+
+        try:
+            parsed_json = None
+            if (cmd_raw.startswith("{") and cmd_raw.endswith("}")) or (cmd_raw.startswith("[") and cmd_raw.endswith("]")):
+                try:
+                    parsed_json = json.loads(cmd_raw)
+                except Exception:
+                    pass
+
+            if parsed_json and isinstance(parsed_json, dict):
+                # 兼顾 action 与 cmd 字段
+                cmd_name = str(parsed_json.get("action") or parsed_json.get("cmd") or "").upper()
+                ip = parsed_json.get("ip", "")
+                path = parsed_json.get("path") or parsed_json.get("app_name", "")
+                args = parsed_json.get("args", "")
+                level = parsed_json.get("level") or parsed_json.get("volume", 50)
+                pid = parsed_json.get("pid")
+                name = parsed_json.get("name") or parsed_json.get("target", "")
+
+                if cmd_name in ("PING", "STATUS", "HEALTH"):
+                    resp_data["msg"] = f"PONG:GWC_MASTER_HUB:ONLINE:{len(master_hub.clients)}"
+                    resp_data["online_count"] = len(master_hub.clients)
+                elif cmd_name in ("GET_CLIENTS", "GET_DEVICES", "DEVICES"):
+                    resp_data["devices"] = master_hub.get_online_clients()
+                    resp_data["total"] = len(resp_data["devices"])
+                elif cmd_name == "ALL_SHUTDOWN":
+                    cnt = master_hub.broadcast_command("CMD_SHUTDOWN", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发关机指令"
+                elif cmd_name == "ALL_REBOOT":
+                    cnt = master_hub.broadcast_command("CMD_REBOOT", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发重启指令"
+                elif cmd_name == "ALL_MUTE":
+                    cnt = master_hub.broadcast_command("CMD_VOLUME", {"action": "mute"})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发静音指令"
+                elif cmd_name == "ALL_UNMUTE":
+                    cnt = master_hub.broadcast_command("CMD_VOLUME", {"action": "unmute"})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发解除静音指令"
+                elif cmd_name in ("ALL_VOLUME", "SET_ALL_VOLUME"):
+                    cnt = master_hub.broadcast_command("CMD_VOLUME", {"action": "set", "level": int(level)})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发音量设定: {level}%"
+                elif cmd_name in ("ALL_RUN", "RUN_ALL", "ALL_LAUNCH"):
+                    cnt = master_hub.broadcast_command("CMD_RUN_APP", {"path": path, "args": args})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发启动指令: {path}"
+                elif cmd_name == "DEV_SHUTDOWN":
+                    ok = master_hub.send_command(ip, "CMD_SHUTDOWN", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"向设备 [{ip}] 下发关机指令: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name == "DEV_REBOOT":
+                    ok = master_hub.send_command(ip, "CMD_REBOOT", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"向设备 [{ip}] 下发重启指令: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name == "DEV_MUTE":
+                    ok = master_hub.send_command(ip, "CMD_VOLUME", {"action": "mute"})
+                    resp_data["msg"] = f"向设备 [{ip}] 下发静音指令: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name == "DEV_UNMUTE":
+                    ok = master_hub.send_command(ip, "CMD_VOLUME", {"action": "unmute"})
+                    resp_data["msg"] = f"向设备 [{ip}] 下发解除静音指令: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name == "DEV_VOLUME":
+                    ok = master_hub.send_command(ip, "CMD_VOLUME", {"action": "set", "level": int(level)})
+                    resp_data["msg"] = f"向设备 [{ip}] 设定音量为 {level}%: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name in ("DEV_RUN", "DEV_LAUNCH"):
+                    ok = master_hub.send_command(ip, "CMD_RUN_APP", {"path": path, "args": args})
+                    resp_data["msg"] = f"向设备 [{ip}] 下发启动程序 {path}: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name == "DEV_KILL":
+                    ok = master_hub.send_command(ip, "CMD_KILL_PROC", {"pid": pid, "name": name})
+                    resp_data["msg"] = f"向设备 [{ip}] 下发结束进程: {'成功' if ok else '失败(离线)'}"
+                elif cmd_name == "SCAN_AGENTS":
+                    threading.Thread(target=lambda: master_hub.scan_online_agents(timeout=1.5, auto_connect=True), daemon=True).start()
+                    resp_data["msg"] = "已触发全网段受控端雷达扫描"
+                else:
+                    resp_data = {"status": "ERROR", "code": 404, "error": f"未支持的 JSON 命令: {cmd_name}"}
+
+            else:
+                # 冒号/空格分隔文本指令 (兼容快思聪/AMX/串口纯字符串)
+                parts = cmd_raw.split(":")
+                cmd_name = parts[0].strip().upper()
+
+                if cmd_name in ("PING", "STATUS", "HEALTH"):
+                    resp_data["msg"] = f"PONG:GWC_MASTER_HUB:ONLINE:{len(master_hub.clients)}"
+                    resp_data["online_count"] = len(master_hub.clients)
+                elif cmd_name in ("GET_DEVICES", "GET_CLIENTS", "DEVICES"):
+                    resp_data["devices"] = master_hub.get_online_clients()
+                    resp_data["total"] = len(resp_data["devices"])
+                elif cmd_name == "ALL_SHUTDOWN":
+                    cnt = master_hub.broadcast_command("CMD_SHUTDOWN", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发关机指令"
+                elif cmd_name == "ALL_REBOOT":
+                    cnt = master_hub.broadcast_command("CMD_REBOOT", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发重启指令"
+                elif cmd_name == "ALL_MUTE":
+                    cnt = master_hub.broadcast_command("CMD_VOLUME", {"action": "mute"})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发静音指令"
+                elif cmd_name == "ALL_UNMUTE":
+                    cnt = master_hub.broadcast_command("CMD_VOLUME", {"action": "unmute"})
+                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发解除静音指令"
+                elif cmd_name in ("ALL_VOLUME", "SET_ALL_VOLUME") and len(parts) >= 2:
+                    lvl = int(parts[1].strip())
+                    cnt = master_hub.broadcast_command("CMD_VOLUME", {"action": "set", "level": lvl})
+                    resp_data["msg"] = f"全馆音量已设定为 {lvl}% (已下发 {cnt} 台)"
+                elif cmd_name in ("ALL_RUN", "ALL_LAUNCH") and len(parts) >= 2:
+                    p = ":".join(parts[1:]).strip()
+                    cnt = master_hub.broadcast_command("CMD_RUN_APP", {"path": p})
+                    resp_data["msg"] = f"全馆已批量启动应用: {p} (已下发 {cnt} 台)"
+                elif cmd_name == "DEV_SHUTDOWN" and len(parts) >= 2:
+                    target_ip = parts[1].strip()
+                    ok = master_hub.send_command(target_ip, "CMD_SHUTDOWN", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发关机指令: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name == "DEV_REBOOT" and len(parts) >= 2:
+                    target_ip = parts[1].strip()
+                    ok = master_hub.send_command(target_ip, "CMD_REBOOT", {"force": True, "timeout": 0})
+                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发重启指令: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name == "DEV_MUTE" and len(parts) >= 2:
+                    target_ip = parts[1].strip()
+                    ok = master_hub.send_command(target_ip, "CMD_VOLUME", {"action": "mute"})
+                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发静音指令: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name == "DEV_UNMUTE" and len(parts) >= 2:
+                    target_ip = parts[1].strip()
+                    ok = master_hub.send_command(target_ip, "CMD_VOLUME", {"action": "unmute"})
+                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发解除静音指令: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name == "DEV_VOLUME" and len(parts) >= 3:
+                    target_ip = parts[1].strip()
+                    lvl = int(parts[2].strip())
+                    ok = master_hub.send_command(target_ip, "CMD_VOLUME", {"action": "set", "level": lvl})
+                    resp_data["msg"] = f"工控机 [{target_ip}] 音量设定为 {lvl}%: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name in ("DEV_RUN", "DEV_LAUNCH") and len(parts) >= 3:
+                    target_ip = parts[1].strip()
+                    run_path = ":".join(parts[2:]).strip()
+                    ok = master_hub.send_command(target_ip, "CMD_RUN_APP", {"path": run_path})
+                    resp_data["msg"] = f"向工控机 [{target_ip}] 启动程序 {run_path}: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name == "DEV_KILL" and len(parts) >= 3:
+                    target_ip = parts[1].strip()
+                    target_proc = parts[2].strip()
+                    pid_val = int(target_proc) if target_proc.isdigit() else None
+                    name_val = None if pid_val else target_proc
+                    ok = master_hub.send_command(target_ip, "CMD_KILL_PROC", {"pid": pid_val, "name": name_val})
+                    resp_data["msg"] = f"向工控机 [{target_ip}] 强杀进程 {target_proc}: {'成功' if ok else '失败(未在线)'}"
+                elif cmd_name == "SCAN_AGENTS":
+                    threading.Thread(target=lambda: master_hub.scan_online_agents(timeout=1.5, auto_connect=True), daemon=True).start()
+                    resp_data["msg"] = "已触发全网段受控端雷达扫描"
+                else:
+                    resp_data = {"status": "ERROR", "code": 404, "error": f"未支持的文本命令: {cmd_raw}"}
+
+            # 触发统一事件总线回调
+            if getattr(master_hub, "on_central_control_event", None):
+                try:
+                    master_hub.on_central_control_event(protocol_name, client_addr, cmd_raw, resp_data)
+                except Exception:
+                    pass
+
+            return resp_data
+
+        except Exception as ex:
+            err_dict = {"status": "ERROR", "code": 500, "error": str(ex), "protocol": protocol_name}
+            if getattr(master_hub, "on_central_control_event", None):
+                try:
+                    master_hub.on_central_control_event(protocol_name, client_addr, cmd_raw, err_dict)
+                except Exception:
+                    pass
+            return err_dict
+
 
 class UdpCentralControlListener:
-    """
-    展馆第三方集中智能中控 UDP 指令接收与调度引擎
-    ==================================================
-    支持快思聪 (Crestron)、AMX、华为/通用工控中控、智能平板及物理按键盒通过 UDP 发送控制报文。
-    默认监听 UDP 端口 9889 (可自定义配置)。
-    """
+    """展馆智能中控 UDP 调度监听器 (默认 UDP 9889)"""
     def __init__(self, master_hub, port: int = UDP_CENTRAL_CONTROL_PORT):
         self.master_hub = master_hub
         self.port = port
@@ -457,9 +648,9 @@ class UdpCentralControlListener:
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.bind(("0.0.0.0", self.port))
             self.sock.settimeout(1.0)
-            print(f"[*] 展馆外部智能中控 UDP 调度接口已就绪: 监听 UDP 端口 {self.port}")
+            print(f"[*] 智能中控 UDP 调度总线已启动: 监听端口 {self.port}")
         except Exception as e:
-            print(f"[-] 绑定外部中控 UDP 端口 {self.port} 失败: {e}")
+            print(f"[-] 绑定中控 UDP 端口 {self.port} 失败: {e}")
             return
 
         while self.running:
@@ -468,157 +659,317 @@ class UdpCentralControlListener:
                 if not data:
                     continue
                 cmd_raw = data.decode("utf-8", errors="ignore").strip()
-                threading.Thread(target=self._dispatch_cmd, args=(cmd_raw, addr), daemon=True).start()
+                threading.Thread(target=self._handle_req, args=(cmd_raw, addr), daemon=True).start()
             except socket.timeout:
                 continue
             except Exception:
                 break
 
-    def _dispatch_cmd(self, cmd_raw: str, addr: tuple):
-        if not cmd_raw:
-            return
-        resp_data = {"status": "SUCCESS", "code": 200, "timestamp": int(time.time())}
-        cmd_name = ""
+    def _handle_req(self, cmd_raw: str, addr: tuple):
+        addr_str = f"{addr[0]}:{addr[1]}"
+        resp_data = CentralControlDispatcher.dispatch(self.master_hub, cmd_raw, protocol_name="UDP", client_addr=addr_str)
         try:
-            # 优先解析 JSON
-            parsed_json = None
-            if cmd_raw.startswith("{") and cmd_raw.endswith("}"):
-                try:
-                    parsed_json = json.loads(cmd_raw)
-                except Exception:
-                    pass
-
-            if parsed_json and isinstance(parsed_json, dict):
-                cmd_name = str(parsed_json.get("cmd", "")).upper()
-                ip = parsed_json.get("ip", "")
-                path = parsed_json.get("path", "")
-                args = parsed_json.get("args", "")
-                level = parsed_json.get("level", 50)
-                pid = parsed_json.get("pid")
-                name = parsed_json.get("name", "")
-
-                if cmd_name == "PING":
-                    resp_data["msg"] = f"PONG:GWC_MASTER_HUB:ONLINE:{len(self.master_hub.clients)}"
-                elif cmd_name == "GET_CLIENTS":
-                    resp_data["clients"] = self.master_hub.get_online_clients()
-                elif cmd_name == "ALL_SHUTDOWN":
-                    cnt = self.master_hub.broadcast_command("CMD_SHUTDOWN", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发关机指令"
-                elif cmd_name == "ALL_REBOOT":
-                    cnt = self.master_hub.broadcast_command("CMD_REBOOT", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发重启指令"
-                elif cmd_name == "ALL_MUTE":
-                    cnt = self.master_hub.broadcast_command("CMD_VOLUME", {"action": "mute"})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发静音指令"
-                elif cmd_name == "ALL_UNMUTE":
-                    cnt = self.master_hub.broadcast_command("CMD_VOLUME", {"action": "unmute"})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发解除静音指令"
-                elif cmd_name in ("ALL_VOLUME", "SET_ALL_VOLUME"):
-                    cnt = self.master_hub.broadcast_command("CMD_VOLUME", {"action": "set", "level": int(level)})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发音量设定: {level}%"
-                elif cmd_name in ("ALL_RUN", "RUN_ALL"):
-                    cnt = self.master_hub.broadcast_command("CMD_RUN_APP", {"path": path, "args": args})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发启动指令: {path}"
-                elif cmd_name == "DEV_SHUTDOWN":
-                    ok = self.master_hub.send_command(ip, "CMD_SHUTDOWN", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"向设备 [{ip}] 下发关机指令: {'成功' if ok else '失败(离线)'}"
-                elif cmd_name == "DEV_REBOOT":
-                    ok = self.master_hub.send_command(ip, "CMD_REBOOT", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"向设备 [{ip}] 下发重启指令: {'成功' if ok else '失败(离线)'}"
-                elif cmd_name == "DEV_MUTE":
-                    ok = self.master_hub.send_command(ip, "CMD_VOLUME", {"action": "mute"})
-                    resp_data["msg"] = f"向设备 [{ip}] 下发静音指令: {'成功' if ok else '失败(离线)'}"
-                elif cmd_name == "DEV_VOLUME":
-                    ok = self.master_hub.send_command(ip, "CMD_VOLUME", {"action": "set", "level": int(level)})
-                    resp_data["msg"] = f"向设备 [{ip}] 设定音量为 {level}%: {'成功' if ok else '失败(离线)'}"
-                elif cmd_name == "DEV_RUN":
-                    ok = self.master_hub.send_command(ip, "CMD_RUN_APP", {"path": path, "args": args})
-                    resp_data["msg"] = f"向设备 [{ip}] 下发启动程序 {path}: {'成功' if ok else '失败(离线)'}"
-                elif cmd_name == "DEV_KILL":
-                    ok = self.master_hub.send_command(ip, "CMD_KILL_PROC", {"pid": pid, "name": name})
-                    resp_data["msg"] = f"向设备 [{ip}] 下发结束进程: {'成功' if ok else '失败(离线)'}"
-                elif cmd_name == "SCAN_AGENTS":
-                    threading.Thread(target=lambda: self.master_hub.scan_online_agents(timeout=1.5, auto_connect=True), daemon=True).start()
-                    resp_data["msg"] = "已触发全网段受控端雷达扫描"
-                else:
-                    resp_data = {"status": "ERROR", "code": 404, "error": f"未支持的 JSON 命令: {cmd_name}"}
-
-            else:
-                # 文本冒号分隔指令
-                parts = cmd_raw.split(":")
-                cmd_name = parts[0].strip().upper()
-
-                if cmd_name == "PING":
-                    resp_data["msg"] = f"PONG:GWC_MASTER_HUB:ONLINE:{len(self.master_hub.clients)}"
-                elif cmd_name == "ALL_SHUTDOWN":
-                    cnt = self.master_hub.broadcast_command("CMD_SHUTDOWN", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发关机指令"
-                elif cmd_name == "ALL_REBOOT":
-                    cnt = self.master_hub.broadcast_command("CMD_REBOOT", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发重启指令"
-                elif cmd_name == "ALL_MUTE":
-                    cnt = self.master_hub.broadcast_command("CMD_VOLUME", {"action": "mute"})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发静音指令"
-                elif cmd_name == "ALL_UNMUTE":
-                    cnt = self.master_hub.broadcast_command("CMD_VOLUME", {"action": "unmute"})
-                    resp_data["msg"] = f"已向全馆 {cnt} 台工控机下发解除静音指令"
-                elif cmd_name == "ALL_VOLUME" and len(parts) >= 2:
-                    lvl = int(parts[1].strip())
-                    cnt = self.master_hub.broadcast_command("CMD_VOLUME", {"action": "set", "level": lvl})
-                    resp_data["msg"] = f"全馆音量已设定为 {lvl}% (已下发 {cnt} 台)"
-                elif cmd_name == "ALL_RUN" and len(parts) >= 2:
-                    p = ":".join(parts[1:]).strip()
-                    cnt = self.master_hub.broadcast_command("CMD_RUN_APP", {"path": p})
-                    resp_data["msg"] = f"全馆已批量启动应用: {p} (已下发 {cnt} 台)"
-                elif cmd_name == "DEV_SHUTDOWN" and len(parts) >= 2:
-                    target_ip = parts[1].strip()
-                    ok = self.master_hub.send_command(target_ip, "CMD_SHUTDOWN", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发关机指令: {'成功' if ok else '失败(未在线)'}"
-                elif cmd_name == "DEV_REBOOT" and len(parts) >= 2:
-                    target_ip = parts[1].strip()
-                    ok = self.master_hub.send_command(target_ip, "CMD_REBOOT", {"force": True, "timeout": 0})
-                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发重启指令: {'成功' if ok else '失败(未在线)'}"
-                elif cmd_name == "DEV_MUTE" and len(parts) >= 2:
-                    target_ip = parts[1].strip()
-                    ok = self.master_hub.send_command(target_ip, "CMD_VOLUME", {"action": "mute"})
-                    resp_data["msg"] = f"向工控机 [{target_ip}] 下发静音指令: {'成功' if ok else '失败(未在线)'}"
-                elif cmd_name == "DEV_VOLUME" and len(parts) >= 3:
-                    target_ip = parts[1].strip()
-                    lvl = int(parts[2].strip())
-                    ok = self.master_hub.send_command(target_ip, "CMD_VOLUME", {"action": "set", "level": lvl})
-                    resp_data["msg"] = f"工控机 [{target_ip}] 音量设定为 {lvl}%: {'成功' if ok else '失败(未在线)'}"
-                elif cmd_name == "DEV_RUN" and len(parts) >= 3:
-                    target_ip = parts[1].strip()
-                    run_path = ":".join(parts[2:]).strip()
-                    ok = self.master_hub.send_command(target_ip, "CMD_RUN_APP", {"path": run_path})
-                    resp_data["msg"] = f"向工控机 [{target_ip}] 启动程序 {run_path}: {'成功' if ok else '失败(未在线)'}"
-                elif cmd_name == "DEV_KILL" and len(parts) >= 3:
-                    target_ip = parts[1].strip()
-                    target_proc = parts[2].strip()
-                    pid_val = int(target_proc) if target_proc.isdigit() else None
-                    name_val = None if pid_val else target_proc
-                    ok = self.master_hub.send_command(target_ip, "CMD_KILL_PROC", {"pid": pid_val, "name": name_val})
-                    resp_data["msg"] = f"向工控机 [{target_ip}] 强杀进程 {target_proc}: {'成功' if ok else '失败(未在线)'}"
-                elif cmd_name == "SCAN_AGENTS":
-                    threading.Thread(target=lambda: self.master_hub.scan_online_agents(timeout=1.5, auto_connect=True), daemon=True).start()
-                    resp_data["msg"] = "已触发全网段受控端雷达扫描"
-                else:
-                    resp_data = {"status": "ERROR", "code": 404, "error": f"未支持的文本命令: {cmd_raw}"}
-
-            # 回发 ACK 确认数据包
             ack_bytes = json.dumps(resp_data, ensure_ascii=False).encode("utf-8")
             self.sock.sendto(ack_bytes, addr)
-
-            # 事件通知
-            if self.on_command_received:
-                self.on_command_received(cmd_raw, addr, resp_data)
-
-        except Exception as ex:
-            err_resp = {"status": "ERROR", "code": 500, "error": str(ex)}
+        except Exception:
+            pass
+        if self.on_command_received:
             try:
-                self.sock.sendto(json.dumps(err_resp).encode("utf-8"), addr)
+                self.on_command_received(cmd_raw, addr, resp_data)
             except Exception:
                 pass
+
+
+class TcpCentralControlListener:
+    """展馆智能中控 TCP Socket 监听器 (默认 TCP 9890)"""
+    def __init__(self, master_hub, port: int = TCP_CENTRAL_CONTROL_PORT):
+        self.master_hub = master_hub
+        self.port = port
+        self.running = False
+        self.server_sock = None
+        self._thread = None
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.server_sock:
+            try:
+                self.server_sock.close()
+            except Exception:
+                pass
+
+    def _listen_loop(self):
+        try:
+            self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_sock.bind(("0.0.0.0", self.port))
+            self.server_sock.listen(10)
+            self.server_sock.settimeout(1.0)
+            print(f"[*] 智能中控 TCP 调度总线已启动: 监听端口 {self.port}")
+        except Exception as e:
+            print(f"[-] 绑定中控 TCP 端口 {self.port} 失败: {e}")
+            return
+
+        while self.running:
+            try:
+                client_sock, addr = self.server_sock.accept()
+                threading.Thread(target=self._handle_client, args=(client_sock, addr), daemon=True).start()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+    def _handle_client(self, client_sock: socket.socket, addr: tuple):
+        addr_str = f"{addr[0]}:{addr[1]}"
+        client_sock.settimeout(10.0)
+        buf = ""
+        try:
+            while self.running:
+                data = client_sock.recv(4096)
+                if not data:
+                    break
+                buf += data.decode("utf-8", errors="ignore")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    cmd_line = line.strip()
+                    if not cmd_line:
+                        continue
+                    resp_dict = CentralControlDispatcher.dispatch(self.master_hub, cmd_line, protocol_name="TCP", client_addr=addr_str)
+                    ack_str = json.dumps(resp_dict, ensure_ascii=False) + "\n"
+                    client_sock.sendall(ack_str.encode("utf-8"))
+        except Exception:
+            pass
+        finally:
+            try:
+                client_sock.close()
+            except Exception:
+                pass
+
+
+class HttpCentralControlServer:
+    """展馆智能中控 HTTP RESTful API 服务 (默认 HTTP 9891)"""
+    def __init__(self, master_hub, port: int = HTTP_CENTRAL_CONTROL_PORT):
+        self.master_hub = master_hub
+        self.port = port
+        self.running = False
+        self.httpd = None
+        self._thread = None
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._run_server, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.httpd:
+            try:
+                self.httpd.shutdown()
+            except Exception:
+                pass
+
+    def _run_server(self):
+        from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+        from urllib.parse import urlparse, parse_qs
+
+        master_ref = self.master_hub
+
+        class HttpApiHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # 静默输出避免刷屏
+
+            def _send_cors_headers(self, code=200, content_type="application/json; charset=utf-8"):
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                self.end_headers()
+
+            def do_OPTIONS(self):
+                self._send_cors_headers(200)
+
+            def do_GET(self):
+                pr = urlparse(self.path)
+                p = pr.path
+                client_addr = f"{self.client_address[0]}:{self.client_address[1]}"
+
+                if p in ("/", "/api", "/api/"):
+                    # 帮助与系统概览
+                    data = {
+                        "name": "展馆智能集群综合管控中心 HTTP RESTful API",
+                        "status": "RUNNING",
+                        "online_agents": len(master_ref.clients),
+                        "ports": {
+                            "udp_control": master_ref.udp_control_port,
+                            "tcp_control": master_ref.tcp_control_port,
+                            "http_api": master_ref.http_control_port
+                        },
+                        "endpoints": {
+                            "GET /api/devices": "获取所有在线工控机清单及视频推流监看地址",
+                            "GET /api/status": "获取中控服务器健康状态",
+                            "POST /api/control": "下发中控调度指令 (JSON body: {\"action\": \"...\", ...})",
+                            "GET /api/control?action=...": "通过 URL 查询参数执行一键调度 (方便浏览器/大屏按钮触发)"
+                        }
+                    }
+                    self._send_cors_headers(200)
+                    self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+
+                elif p == "/api/devices":
+                    devices = master_ref.get_online_clients()
+                    self._send_cors_headers(200)
+                    self.wfile.write(json.dumps({"status": "SUCCESS", "count": len(devices), "devices": devices}, ensure_ascii=False).encode("utf-8"))
+
+                elif p == "/api/status":
+                    self._send_cors_headers(200)
+                    self.wfile.write(json.dumps({"status": "SUCCESS", "online_count": len(master_ref.clients), "time": int(time.time())}).encode("utf-8"))
+
+                elif p == "/api/control":
+                    qs = parse_qs(pr.query)
+                    payload = {}
+                    for k, v in qs.items():
+                        payload[k] = v[0] if len(v) == 1 else v
+                    res = CentralControlDispatcher.dispatch(master_ref, json.dumps(payload), protocol_name="HTTP", client_addr=client_addr)
+                    self._send_cors_headers(200)
+                    self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+
+                else:
+                    self._send_cors_headers(404)
+                    self.wfile.write(json.dumps({"status": "ERROR", "error": "Not Found"}).encode("utf-8"))
+
+            def do_POST(self):
+                pr = urlparse(self.path)
+                client_addr = f"{self.client_address[0]}:{self.client_address[1]}"
+                if pr.path == "/api/control":
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(length).decode("utf-8", errors="ignore")
+                    res = CentralControlDispatcher.dispatch(master_ref, body, protocol_name="HTTP", client_addr=client_addr)
+                    self._send_cors_headers(200)
+                    self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+                else:
+                    self._send_cors_headers(404)
+                    self.wfile.write(json.dumps({"status": "ERROR", "error": "Endpoint Not Found"}).encode("utf-8"))
+
+        try:
+            self.httpd = ThreadingHTTPServer(("0.0.0.0", self.port), HttpApiHandler)
+            print(f"[*] 智能中控 HTTP RESTful API 总线已就绪: http://0.0.0.0:{self.port}/api")
+            self.httpd.serve_forever()
+        except Exception as e:
+            print(f"[-] 启动中控 HTTP API 服务失败 (端口 {self.port}): {e}")
+
+
+class SerialCentralControlListener:
+    """展馆智能中控 物理串口 (RS232/RS485) 监听器"""
+    def __init__(self, master_hub):
+        self.master_hub = master_hub
+        self.port_name = ""
+        self.baudrate = 9600
+        self.running = False
+        self.serial_obj = None
+        self._thread = None
+
+    @staticmethod
+    def list_available_ports() -> list:
+        """原生枚举 Windows 可用物理与虚拟串口 (无需依赖第三方库)"""
+        ports = []
+        # 1. 优先尝试 pyserial
+        try:
+            import serial.tools.list_ports
+            for p in serial.tools.list_ports.comports():
+                ports.append(p.device)
+            if ports:
+                return sorted(list(set(ports)))
+        except Exception:
+            pass
+
+        # 2. 纯 Windows 注册表原生枚举
+        if sys.platform == "win32":
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM")
+                for i in range(64):
+                    try:
+                        _, val, _ = winreg.EnumValue(key, i)
+                        if val:
+                            ports.append(str(val))
+                    except OSError:
+                        break
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+
+        if not ports:
+            # 常见备选
+            ports = ["COM1", "COM2", "COM3", "COM4"]
+        return sorted(list(set(ports)))
+
+    def start(self, port_name: str, baudrate: int = 9600) -> tuple:
+        """启动指定串口监听"""
+        self.stop()
+        self.port_name = port_name
+        self.baudrate = baudrate
+        try:
+            import serial
+        except ImportError:
+            return False, "未安装 pyserial 串口模块，请执行 pip install pyserial"
+
+        try:
+            self.serial_obj = serial.Serial(self.port_name, self.baudrate, timeout=1.0)
+            self.running = True
+            self._thread = threading.Thread(target=self._serial_loop, daemon=True)
+            self._thread.start()
+            print(f"[*] 智能中控串口监听已启动: {self.port_name} (波特率 {self.baudrate})")
+            return True, f"已开启串口 {self.port_name} 监听"
+        except Exception as e:
+            return False, f"打开串口 {self.port_name} 失败: {e}"
+
+    def stop(self):
+        self.running = False
+        if self.serial_obj:
+            try:
+                self.serial_obj.close()
+            except Exception:
+                pass
+            self.serial_obj = None
+
+    def _serial_loop(self):
+        buf = ""
+        while self.running and self.serial_obj and self.serial_obj.is_open:
+            try:
+                raw = self.serial_obj.read(128)
+                if not raw:
+                    continue
+                buf += raw.decode("utf-8", errors="ignore")
+                while "\n" in buf or "\r" in buf:
+                    # 兼容 \r\n 或 \n
+                    if "\r\n" in buf:
+                        line, buf = buf.split("\r\n", 1)
+                    elif "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                    elif "\r" in buf:
+                        line, buf = buf.split("\r", 1)
+                    else:
+                        break
+
+                    cmd_line = line.strip()
+                    if not cmd_line:
+                        continue
+                    resp = CentralControlDispatcher.dispatch(self.master_hub, cmd_line, protocol_name="SERIAL", client_addr=self.port_name)
+                    ack_line = f"ACK:{resp.get('msg', 'OK')}\r\n"
+                    try:
+                        self.serial_obj.write(ack_line.encode("utf-8"))
+                    except Exception:
+                        pass
+            except Exception:
+                break
 
 
 def struct_unpack_len(buffer: bytes) -> int:

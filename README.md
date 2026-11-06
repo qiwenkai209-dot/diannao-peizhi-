@@ -83,26 +83,57 @@
 
 ---
 
-## 📡 展馆第三方集中智能中控 UDP 指令调度协议说明
+## 📡 展馆第三方集中智能中控多协议总线 (UDP / TCP / HTTP / 串口) 与视频推流规范
 
-为无缝接入中控室主流硬件（**快思聪 Crestron、AMX、华为/快捷中控主机、第三方智能中控平板、Web 调度后端**），主控端特别开启了 **UDP 9889** 专用中控接口。
+为无缝接入中控室主流硬件（**快思聪 Crestron、AMX、华为/快捷/台达中控主机、第三方智能中控平板、网页Web大屏系统、物理串口按键网关**），主控端特别开启了四合一全协议中控调度总线。
 
-### 1. 通信基础
-- **监听协议**：UDP（无连接，高实时性）
-- **通信端口**：`9889`（绑定主控机全网卡 `0.0.0.0`）
-- **字符编码**：UTF-8 或 ASCII
-- **格式支持**：兼容**纯文本指令（字符串）**与**标准 JSON 报文**双模通信。
-- **应答机制 (ACK)**：主控端收到指令并执行后，会自动向指令发送方的源 IP 与源端口回传确认报文：
-  `ACK:<ACTION>:OK` 或 `{"status":"ok","action":"..."}`。
+### 1. 通信总线协议与端口分布
+- **UDP 控制接口**：端口 `9889`（无连接极速响应，支持单包指令与自动 ACK）
+- **TCP 控制接口**：端口 `9890`（面向快思聪/AMX 等长短连接 Socket，以 `\n` 分隔）
+- **HTTP RESTful API**：端口 `9891`（面向 Web 大屏、平板浏览器、小程序、curl，支持跨域 CORS）
+- **物理串口 (RS232/RS485)**：支持选择本机 COM 端口（如 COM1/COM2/COM3），波特率 9600/115200
+- **字符编码**：UTF-8 / ASCII
+- **格式支持**：兼容**纯文本指令（冒号分隔）**与**标准 JSON 报文**双模通信。
 
 ---
 
-### 2. 指令集规范列表
+### 2. 视频推流与实时桌面监看地址规范
+
+各工控机在局域网内拥有独立的 IP 地址，中控平板、大屏流媒体播放器或 Web 页面可通过以下地址直接拉流：
+
+| 流媒体协议 | 拉流 URL 格式规范 | 典型应用场景 |
+| :--- | :--- | :--- |
+| **原生 VNC 控制流** | `vnc://<工控机IP>:5900` | 主控端内嵌远程桌面、TightVNC 客户端直连控制 |
+| **WebRTC 低延时监看** | `webrtc://<工控机IP>:5900/live` | 中控室超低延迟无感画面回传 |
+| **HTTP MJPEG 画面流** | `http://<工控机IP>:5901/stream.mjpg` | 浏览器、前端大屏网页 `<img>` 标签直接免插件播放 |
+| **RTSP 展厅监控流** | `rtsp://<工控机IP>:8554/live` | 集中监控 NVR、OBS、VLC 播放器拉流 |
+
+---
+
+### 3. HTTP RESTful API 接口速查 (端口 9891)
+
+| 请求方法与路径 | 参数说明 | 功能说明与返回示例 |
+| :--- | :--- | :--- |
+| `GET /api/devices` | 无 | 获取所有在线工控机清单、CPU/GPU/内存、**视频推流地址** |
+| `GET /api/status` | 无 | 获取中控服务器健康状态与在线工控机总数 |
+| `GET /api/control?action=...` | `action`, `ip`, `volume`, `app_name` | URL 超链接一键控制（方便直接做在前端网页按键上） |
+| `POST /api/control` | JSON Body: `{"action":"..."}` | 下发 JSON 控制指令（支持跨域 CORS） |
+
+**URL 一键控制快捷示例**：
+- 全馆一键关机：`http://<Master_IP>:9891/api/control?action=all_shutdown`
+- 全馆一键重启：`http://<Master_IP>:9891/api/control?action=all_reboot`
+- 设定全馆音量：`http://<Master_IP>:9891/api/control?action=all_volume&volume=80`
+- 设定单机音量：`http://<Master_IP>:9891/api/control?action=dev_volume&ip=192.168.1.50&volume=65`
+- 单机启动应用：`http://<Master_IP>:9891/api/control?action=dev_launch&ip=192.168.1.50&app_name=数字沙盘`
+
+---
+
+### 4. UDP / TCP / 串口 指令集规范列表
 
 | 指令功能 | 纯文本格式命令 (Text) | 标准 JSON 格式命令 | 说明与示例 |
 | :--- | :--- | :--- | :--- |
-| **全馆一键关机** | `ALL_SHUTDOWN` | `{"action":"all_shutdown"}` | 调度全馆所有已连接受控端安全关机 |
-| **全馆一键重启** | `ALL_REBOOT` | `{"action":"all_reboot"}` | 调度全馆所有已连接受控端安全重启 |
+| **全馆一键关机** | `ALL_SHUTDOWN` | `{"action":"all_shutdown"}` | 调度全馆所有已连接工控机安全关机 |
+| **全馆一键重启** | `ALL_REBOOT` | `{"action":"all_reboot"}` | 调度全馆所有已连接工控机安全重启 |
 | **全馆一键静音** | `ALL_MUTE` | `{"action":"all_mute"}` | 全馆所有工控机一键静音 |
 | **全馆解除静音** | `ALL_UNMUTE` | `{"action":"all_unmute"}` | 全馆所有工控机恢复声音播放 |
 | **全馆统一音量** | `ALL_VOLUME:<0-100>` | `{"action":"all_volume","volume":75}` | 统一全馆音量。例如：`ALL_VOLUME:80` |
@@ -116,58 +147,48 @@
 
 ---
 
-### 3. 第三方中控对接调用示例
+### 5. 第三方中控对接调用示例
 
-#### ① Python 脚本测试调用示例
-```python
-import socket
-import json
+#### ① HTTP API 调用示例 (cURL / 浏览器)
+```bash
+# 获取所有工控机状态与推流地址
+curl -X GET "http://192.168.1.100:9891/api/devices"
 
-# 主控端 IP 与专用中控 UDP 端口
-MASTER_IP = "192.168.1.100"
-MASTER_PORT = 9889
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.settimeout(2.0)
-
-# 方式 A: 发送纯文本指令 (例如统一将全馆音量设置为 75%)
-cmd_text = "ALL_VOLUME:75"
-sock.sendto(cmd_text.encode("utf-8"), (MASTER_IP, MASTER_PORT))
-ack, addr = sock.recvfrom(1024)
-print("收到主控应答:", ack.decode("utf-8"))
-
-# 方式 B: 发送 JSON 报文 (例如单机启动 192.168.1.50 上的 "沉浸式环幕")
-cmd_json = {
-    "action": "dev_launch",
-    "ip": "192.168.1.50",
-    "app_name": "沉浸式环幕"
-}
-sock.sendto(json.dumps(cmd_json).encode("utf-8"), (MASTER_IP, MASTER_PORT))
-ack, addr = sock.recvfrom(1024)
-print("收到主控应答:", ack.decode("utf-8"))
+# 发送控制指令: 全馆统一音量为 85%
+curl -X GET "http://192.168.1.100:9891/api/control?action=all_volume&volume=85"
 ```
 
-#### ② 快思聪 (Crestron SIMPL+) 伪代码对接示例
+#### ② TCP Socket 调用示例 (Python / 快思聪)
+```python
+import socket
+
+# 连接主控端 TCP 9890 端口
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(("192.168.1.100", 9890))
+s.sendall(b"ALL_VOLUME:80\n")
+ack = s.recv(1024)
+print("收到主控 TCP 应答:", ack.decode("utf-8"))
+s.close()
+```
+
+#### ③ 物理串口对接示例 (RS232 / RS485 / 串口网关)
+- 打开串口（如 `COM1`），设置波特率 `9600`，数据位 8，停止位 1，无校验。
+- 发送文本命令：`ALL_SHUTDOWN\r\n`
+- 主控端即时向串口写回 ACK：`ACK:已向全馆 8 台工控机下发关机指令\r\n`
+
+#### ④ 快思聪 (Crestron SIMPL+) 伪代码对接示例
 ```c
-// 定义发送 UDP 报文函数
 Function SendToGWC(STRING strCmd)
 {
     SIGNED_INTEGER nSocket;
     nSocket = SocketUDP_Create();
-    // 假设主控 IP 为 192.168.1.100，端口 9889
+    // 向主控电脑 192.168.1.100 端口 9889 发送
     SocketUDP_Send(nSocket, "192.168.1.100", 9889, strCmd, Len(strCmd));
 }
 
-// 触摸屏按键事件触发：全馆一键关机
 PUSH Btn_All_Shutdown
 {
     SendToGWC("ALL_SHUTDOWN");
-}
-
-// 触摸屏按键事件触发：设定音量为 80%
-PUSH Btn_Vol_80
-{
-    SendToGWC("ALL_VOLUME:80");
 }
 ```
 

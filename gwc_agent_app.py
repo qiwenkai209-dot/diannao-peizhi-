@@ -357,20 +357,33 @@ class AgentAppUI:
             badge = "已激活" if ok else "未激活 (点击展开授权)"
             self.card_license.set_status(f"{status_txt} [{badge}]", fg=status_color)
 
+    def _release_license_lock(self):
+        """完美释放授权锁止状态，恢复终端菜单与全部操作功能"""
+        if hasattr(self, "_license_modal_win") and self._license_modal_win:
+            try:
+                self._license_modal_win.grab_release()
+            except Exception:
+                pass
+            try:
+                self._license_modal_win.destroy()
+            except Exception:
+                pass
+            self._license_modal_win = None
+
+        self._update_auth_ui_display(True)
+        # 解锁并展示终端主窗口与菜单
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
     def _on_remote_authorized_sync(self, act_code: str, msg: str):
         """当主控中心通过网络远程下发并激活商业授权时的同步回调"""
         def update():
-            if hasattr(self, "_license_modal_win") and self._license_modal_win and self._license_modal_win.winfo_exists():
-                try:
-                    self._license_modal_win.destroy()
-                except Exception:
-                    pass
-                self._license_modal_win = None
-            self._update_auth_ui_display(True)
+            self._release_license_lock()
             self.status_text_var.set("🎉 已接收到主控中心远程签发的商业许可证，终端菜单已成功解锁！")
-            # 激活成功后解锁展现终端主窗口与菜单
-            self.root.deiconify()
-            self.root.lift()
             messagebox.showinfo(
                 "授权成功",
                 f"🎉 已成功接收到主控中心远程签发的商业授权！\n激活码: {act_code}\n终端菜单已解锁并激活。"
@@ -382,7 +395,7 @@ class AgentAppUI:
             pass
 
     def _show_license_dialog(self, reason: str = "软件未获得官方商业授权"):
-        """前置授权验证对话框 (最前置、无法关闭、不显示终端菜单)"""
+        """前置授权验证对话框 (顶层守护、键盘焦点直达输入框、无法关闭、不显示终端菜单)"""
         # 强制隐藏主窗口和终端菜单，绝对不显示
         self.root.withdraw()
 
@@ -390,7 +403,8 @@ class AgentAppUI:
             try:
                 self._license_modal_win.lift()
                 self._license_modal_win.attributes("-topmost", True)
-                self._license_modal_win.focus_force()
+                if hasattr(self, "_license_code_entry") and self._license_code_entry.winfo_exists():
+                    self._license_code_entry.focus_force()
             except Exception:
                 pass
             return
@@ -398,32 +412,20 @@ class AgentAppUI:
         win = tk.Toplevel(self.root)
         self._license_modal_win = win
         win.title("商业授权验证 · 展馆控制终端")
-        win.geometry("540x440")
+        win.geometry("560x450")
         win.configure(bg="#0f172a")
         win.resizable(False, False)
 
         ws = win.winfo_screenwidth()
         hs = win.winfo_screenheight()
-        win.geometry(f"540x440+{(ws-540)//2}+{(hs-440)//2}")
+        win.geometry(f"560x450+{(ws-560)//2}+{(hs-450)//2}")
 
         try:
             win.attributes("-topmost", True)
-            win.focus_force()
         except Exception:
             pass
 
-        # 最前置持续守护: 定时刷新保持全屏最顶层，杜绝被遮挡
-        def _keep_modal_topmost():
-            if hasattr(self, "_license_modal_win") and self._license_modal_win and self._license_modal_win.winfo_exists():
-                try:
-                    self._license_modal_win.lift()
-                    self._license_modal_win.attributes("-topmost", True)
-                except Exception:
-                    pass
-                self.root.after(400, _keep_modal_topmost)
-        self.root.after(400, _keep_modal_topmost)
-
-        # 拦截关闭行为: 无法关闭弹窗！
+        # 拦截关闭行为: 无法随意关闭弹窗，需完成核销或退出软件
         def _on_close_attempt():
             messagebox.showwarning(
                 "授权锁定",
@@ -432,8 +434,8 @@ class AgentAppUI:
             )
         win.protocol("WM_DELETE_WINDOW", _on_close_attempt)
 
-        tk.Label(win, text="🔒 展馆控制终端 · 商业授权锁定", font=("Segoe UI", 13, "bold"), bg="#0f172a", fg="#f59e0b").pack(pady=(18, 4))
-        tk.Label(win, text=f"状态提醒: {reason} (终端菜单已锁定)", font=("Segoe UI", 9), bg="#0f172a", fg="#ef4444").pack(pady=(0, 10))
+        tk.Label(win, text="🔒 展馆控制终端 · 商业授权锁定", font=("Segoe UI", 13, "bold"), bg="#0f172a", fg="#f59e0b").pack(pady=(16, 4))
+        tk.Label(win, text=f"状态提醒: {reason} (终端菜单已锁定)", font=("Segoe UI", 9), bg="#0f172a", fg="#ef4444").pack(pady=(0, 8))
 
         card = tk.Frame(win, bg="#1e293b", padx=16, pady=12)
         card.pack(fill=tk.BOTH, expand=True, padx=24, pady=4)
@@ -444,46 +446,64 @@ class AgentAppUI:
 
         r_code = tk.Frame(card, bg="#1e293b")
         r_code.pack(fill=tk.X, pady=4)
-        tk.Label(r_code, text=req_code, font=("Consolas", 16, "bold"), bg="#0f172a", fg="#34d399", padx=14, pady=4).pack(side=tk.LEFT)
+        tk.Label(r_code, text=req_code, font=("Consolas", 15, "bold"), bg="#0f172a", fg="#34d399", padx=12, pady=3).pack(side=tk.LEFT)
 
         def copy_c():
             self.root.clipboard_clear()
             self.root.clipboard_append(req_code)
             messagebox.showinfo("已复制", f"设备申请码已成功复制到剪贴板:\n{req_code}", parent=win)
 
-        tk.Button(r_code, text="📋 复制申请码", font=("Segoe UI", 9, "bold"), bg="#059669", fg="#fff", relief="flat", padx=10, pady=3, cursor="hand2", command=copy_c).pack(side=tk.LEFT, padx=10)
+        tk.Button(r_code, text="📋 复制申请码", font=("Segoe UI", 9, "bold"), bg="#059669", fg="#fff", relief="flat", padx=10, pady=2, cursor="hand2", command=copy_c).pack(side=tk.LEFT, padx=10)
 
-        tk.Label(card, text="输入 16 位专属商业激活码 (支持自定义小时、月、永久):", font=("Segoe UI", 9), bg="#1e293b", fg="#cbd5e1").pack(anchor="w", pady=(12, 2))
-        ent_code = tk.Entry(card, font=("Consolas", 12, "bold"), bg="#0f172a", fg="#38bdf8", justify="center", relief="flat")
-        ent_code.pack(fill=tk.X, ipady=4)
+        tk.Label(card, text="输入 16 位专属商业激活码 (支持按小时、月、永久自定义签发):", font=("Segoe UI", 9, "bold"), bg="#1e293b", fg="#38bdf8").pack(anchor="w", pady=(10, 2))
 
-        tk.Label(card, text="提示: 联网状态下中控室主控端亦可一键免密远程签发并自动解锁", font=("Segoe UI", 8), bg="#1e293b", fg="#94a3b8").pack(anchor="w", pady=(4, 0))
+        r_ent = tk.Frame(card, bg="#1e293b")
+        r_ent.pack(fill=tk.X, pady=2)
+
+        ent_code = tk.Entry(r_ent, font=("Consolas", 12, "bold"), bg="#0f172a", fg="#38bdf8", justify="center", relief="flat")
+        ent_code.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        self._license_code_entry = ent_code
+
+        def paste_code():
+            try:
+                txt_cb = self.root.clipboard_get().strip().upper()
+                if txt_cb:
+                    ent_code.delete(0, tk.END)
+                    ent_code.insert(0, txt_cb)
+                    ent_code.focus_set()
+            except Exception:
+                pass
+
+        tk.Button(r_ent, text="📋 粘贴激活码", font=("Segoe UI", 9, "bold"), bg="#334155", fg="#38bdf8", relief="flat", padx=8, pady=2, cursor="hand2", command=paste_code).pack(side=tk.LEFT, padx=(6, 0))
+
+        tk.Label(card, text="💡 提示: 键盘按 Enter 回车键可直接核销；中控室主控端亦可一键免密远程签发并自动解锁", font=("Segoe UI", 8), bg="#1e293b", fg="#94a3b8").pack(anchor="w", pady=(6, 0))
 
         def do_act():
-            code = ent_code.get().strip()
+            code = ent_code.get().strip().upper()
             if not code:
                 messagebox.showerror("错误", "请输入 16 位商业激活码！", parent=win)
+                ent_code.focus_set()
                 return
             ok, m = self.license_mgr.activate(code, force_overwrite=True)
             if ok:
-                self._update_auth_ui_display(True)
-                messagebox.showinfo("成功", f"商业授权验证通过！\n{m}", parent=win)
-                try:
-                    win.destroy()
-                except Exception:
-                    pass
-                self._license_modal_win = None
-                # 解锁并展示主窗口终端菜单
-                self.root.deiconify()
-                self.root.lift()
+                self._release_license_lock()
+                messagebox.showinfo("成功", f"商业授权验证通过！\n{m}")
             else:
                 messagebox.showerror("激活失败", f"激活失败: {m}", parent=win)
+                ent_code.focus_set()
+                ent_code.select_range(0, tk.END)
+
+        # 绑定回车键一键核销
+        ent_code.bind("<Return>", lambda e: do_act())
 
         btn_box = tk.Frame(win, bg="#0f172a")
         btn_box.pack(fill=tk.X, padx=24, pady=12)
 
-        tk.Button(btn_box, text="⚡ 立即核销激活并解锁", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=14, pady=6, cursor="hand2", command=do_act).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        tk.Button(btn_box, text="⚡ 立即核销激活并解锁 (Enter)", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=14, pady=6, cursor="hand2", command=do_act).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         tk.Button(btn_box, text="❌ 彻底退出软件", font=("Segoe UI", 9), bg="#475569", fg="#ef4444", relief="flat", padx=12, pady=6, cursor="hand2", command=self.quit_app).pack(side=tk.RIGHT)
+
+        # 延迟聚焦输入框，确保用户弹窗瞬间就能键盘打字输入
+        self.root.after(120, lambda: (ent_code.focus_force(), ent_code.select_range(0, tk.END)))
 
     # ==================== 界面主题与样式 ====================
     def _setup_styles(self):

@@ -52,8 +52,8 @@ except ImportError:
 
 class MarqueeLabel(tk.Canvas):
     """
-    走马灯平滑滚动显示组件：
-    当文本内容超出可视宽度时自动平滑循环滚动播放，放得下时静态靠左显示。
+    走马灯平滑滚动显示组件 (防闪烁重构版)：
+    文本未变更时零重绘，文本变更时增量更新 item，绝不暴力 delete('all')，彻底消除闪烁。
     """
     def __init__(self, parent, text="", font=("Segoe UI", 9), bg="#151c2c", fg="#38bdf8", height=24, speed=1, fps=30, **kwargs):
         super().__init__(parent, bg=bg, height=height, highlightthickness=0, bd=0, **kwargs)
@@ -61,7 +61,7 @@ class MarqueeLabel(tk.Canvas):
         self.font = font
         self.fg = fg
         self.speed = speed
-        self.interval = max(20, int(1000 / fps))
+        self.interval = max(25, int(1000 / fps))
         self.offset_x = 0
         self.text_width = 0
         self._animating = False
@@ -72,26 +72,31 @@ class MarqueeLabel(tk.Canvas):
         self.after(50, self._init_render)
 
     def _init_render(self):
-        self._update_text()
+        self._render_or_update_text()
 
     def set_text(self, text: str, fg: str = None):
+        if text == self.text and (fg is None or fg == self.fg):
+            return  # 文本与颜色完全一致，直接忽略，杜绝不必要的重绘闪烁
         if fg:
             self.fg = fg
         self.text = text
         self.offset_x = 0
-        self._update_text()
+        self._render_or_update_text()
 
-    def _update_text(self):
-        self.delete("all")
-        if not self.text:
-            return
+    def _render_or_update_text(self):
         h = self.winfo_height()
         if h <= 1:
             h = int(self.cget("height")) if self.cget("height") else 24
-        self._text_item = self.create_text(
-            self.offset_x, h // 2,
-            text=self.text, font=self.font, fill=self.fg, anchor="w"
-        )
+
+        if not self._text_item:
+            self._text_item = self.create_text(
+                self.offset_x, h // 2,
+                text=self.text, font=self.font, fill=self.fg, anchor="w"
+            )
+        else:
+            self.itemconfigure(self._text_item, text=self.text, fill=self.fg)
+            self.coords(self._text_item, self.offset_x, h // 2)
+
         bbox = self.bbox(self._text_item)
         if bbox:
             self.text_width = bbox[2] - bbox[0]
@@ -189,6 +194,7 @@ class MasterAppUI:
         self.master_hub.on_status_updated = self._on_agent_status_updated
         self.master_hub.on_backup_saved = self._on_backup_saved
         self.master_hub.on_udp_command_received = self._on_udp_command_received
+        self.master_hub.on_central_control_event = self._on_central_control_event
 
         # 启动主控 TCP 监听与后台上线侦听
         self.master_hub.start()
@@ -242,27 +248,7 @@ class MasterAppUI:
         return (h % 4095) + 1
 
     def _is_self_device(self, client_ip: str, req_code: str = "") -> bool:
-        """主控安全策略判定：禁止主控端对自己进行商业授权"""
-        if client_ip in ("127.0.0.1", "localhost", "::1"):
-            return True
-        try:
-            local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
-            if client_ip in local_ips:
-                return True
-        except Exception:
-            pass
-        if req_code and universal_license_core:
-            try:
-                dec = universal_license_core.decode_request_code(req_code, "VisualCast")
-                if dec.get("valid") and dec.get("hw_hash") == self.local_hw_hash:
-                    return True
-            except Exception:
-                pass
-        if self.local_req_code and req_code:
-            c1 = self.local_req_code.replace("-", "").upper()
-            c2 = req_code.replace("-", "").upper()
-            if c1 == c2:
-                return True
+        """支持给包括本机在内的所有设备授权，不阻拦任何机器"""
         return False
 
     # ==================== 主题与样式 ====================
@@ -385,7 +371,7 @@ class MasterAppUI:
 
         lbl_sub = tk.Label(
             title_box,
-            text="Master Controller Hub · 集群TCP: 9888 | 广播雷达: 9887 | 智能中控接口: UDP 9889",
+            text="Master Controller Hub · 集群TCP: 9888 | 中控总线: UDP 9889 | TCP 9890 | HTTP 9891 | 串口COM | 桌面推流: 5900",
             font=("Segoe UI", 8),
             bg=self.BG_PANEL,
             fg=self.TEXT_MUTED
@@ -423,10 +409,10 @@ class MasterAppUI:
         )
         btn_search.pack(side=tk.LEFT, padx=6)
 
-        # 中控接口文档帮助按钮: 【📖 中控协议接口说明】
+        # 中控接口文档帮助按钮: 【📖 中控全协议 (UDP/TCP/HTTP/串口) 与推流 API 手册】
         btn_udp_doc = tk.Button(
             top_bar,
-            text="📖 中控UDP指令手册",
+            text="📖 中控全协议与推流API",
             font=("Segoe UI", 9, "bold"),
             bg="#1e293b",
             fg="#38bdf8",
@@ -802,6 +788,36 @@ class MasterAppUI:
             pady=2,
             cursor="hand2",
             command=self._ctl_run_app
+        ).pack(side=tk.RIGHT)
+
+        # 第 4 行: 视频推流地址与 API 接口标注
+        r4 = tk.Frame(ctl_box, bg=self.BG_PANEL)
+        r4.pack(fill=tk.X, padx=8, pady=(2, 6))
+
+        tk.Label(r4, text="推流/API:", font=("Segoe UI", 8, "bold"), fg="#10b981", bg=self.BG_PANEL).pack(side=tk.LEFT)
+        self.stream_url_var = tk.StringVar(value="-- 请在左侧列表中选定工控机 --")
+        ent_stream = tk.Entry(r4, textvariable=self.stream_url_var, font=("Consolas", 8), bg="#0f172a", fg="#34d399", relief="flat")
+        ent_stream.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        def copy_stream_addr():
+            u = self.stream_url_var.get().strip()
+            if u and "--" not in u:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(u)
+                self.notice_var.set(f"已复制设备视频推流/API地址: {u}")
+                messagebox.showinfo("已复制", f"已复制工控机视频推流与API接口地址:\n{u}")
+
+        tk.Button(
+            r4,
+            text="📋 复制推流与API",
+            font=("Segoe UI", 8),
+            bg="#059669",
+            fg="#ffffff",
+            relief="flat",
+            padx=6,
+            pady=1,
+            cursor="hand2",
+            command=copy_stream_addr
         ).pack(side=tk.RIGHT)
 
         # 运行中软件与进程列表 (支持远程强杀)
@@ -1621,14 +1637,6 @@ class MasterAppUI:
         c_info = self.master_hub.clients.get(ip, {}).get("info", {})
         req_code = c_info.get("license", {}).get("request_code", "")
 
-        # 商业授权安全策略限制：主控端不可与主控自己授权
-        if self._is_self_device(ip, req_code):
-            messagebox.showwarning(
-                "授权安全策略限制",
-                "⚠️ 授权策略限制：\n主控端仅可对展馆受控终端进行远程商业授权，\n严禁对主控端本机自身进行授权！"
-            )
-            return
-
         mode = self.auth_mode_var.get()
         val = 1
         if mode == "hour":
@@ -1704,9 +1712,6 @@ class MasterAppUI:
             import gwc_license_terminal as lt
             dec = lt.decode_request_code(req)
             if dec.get("valid"):
-                if dec.get("hw_hash") == self.local_hw_hash:
-                    messagebox.showwarning("授权安全限制", "⚠️ 检测到该申请码为主控端本机硬件申请码！\n系统安全策略已拦截为主控端本机自授权。")
-                    return
                 act = lt.generate_terminal_license(dec["hw_hash"], dec["nonce"], auth_type=mode, custom_val=val)
         except Exception:
             pass
@@ -1716,9 +1721,6 @@ class MasterAppUI:
             try:
                 dec_leg = universal_license_core.decode_request_code(req, "VisualCast")
                 if dec_leg.get("valid"):
-                    if dec_leg.get("hw_hash") == self.local_hw_hash:
-                        messagebox.showwarning("授权安全限制", "⚠️ 检测到该申请码为主控端本机硬件申请码！\n系统安全策略已拦截为主控端本机自授权。")
-                        return
                     act = universal_license_core.encode_license(dec_leg["hw_hash"], dec_leg["nonce"], 31, 31, "VisualCast")
             except Exception:
                 pass
@@ -1778,20 +1780,48 @@ class MasterAppUI:
         # 刷新受控端预设应用下拉列表
         self._update_preset_combo(ip)
 
-        # 刷新进程树
-        for i in self.proc_tree.get_children():
-            self.proc_tree.delete(i)
-        procs = info.get("top_processes", [])
-        for p in procs:
-            sz_str = f"{p.get('memory_mb', 0)} MB"
-            self.proc_tree.insert("", "end", iid=str(p.get("pid")), text=p.get("name"), values=(p.get("pid"), sz_str))
+        # 标注视频推流地址与 API 接口
+        if hasattr(self, "stream_url_var"):
+            self.stream_url_var.set(f"推流: vnc://{ip}:5900 | webrtc://{ip}:5900/live | http://{ip}:5901/stream.mjpg")
 
-        # 单击设备仅更新右侧状态面板，不再弹出浮窗遮挡
-        pass
+        # 刷新进程树 (采用增量 Diff 策略，杜绝闪烁和点击落空)
+        procs = info.get("top_processes", [])
+        cur_sel = self.proc_tree.selection()
+        cur_pid = cur_sel[0] if cur_sel else None
+        existing_pids = set(self.proc_tree.get_children())
+        new_pids = set()
+        for p in procs:
+            item_id = str(p.get("pid"))
+            new_pids.add(item_id)
+            p_name = p.get("name")
+            sz_str = f"{p.get('memory_mb', 0)} MB"
+            vals = (p.get("pid"), sz_str)
+            if item_id in existing_pids:
+                old_vals = self.proc_tree.item(item_id, "values")
+                if tuple(str(x) for x in old_vals) != tuple(str(x) for x in vals):
+                    self.proc_tree.item(item_id, text=p_name, values=vals)
+            else:
+                self.proc_tree.insert("", "end", iid=item_id, text=p_name, values=vals)
+        for stale_id in existing_pids - new_pids:
+            self.proc_tree.delete(stale_id)
+        if cur_pid and self.proc_tree.exists(cur_pid):
+            if not self.proc_tree.selection() or self.proc_tree.selection()[0] != cur_pid:
+                self.proc_tree.selection_set(cur_pid)
 
     def _get_selected_client_ip(self) -> str:
         sel = self.client_tree.selection()
-        return sel[0] if sel else ""
+        if sel and sel[0]:
+            self.selected_ip = sel[0]
+            return sel[0]
+        if hasattr(self, "selected_ip") and self.selected_ip:
+            if self.selected_ip in self.master_hub.clients:
+                try:
+                    if self.client_tree.exists(self.selected_ip):
+                        self.client_tree.selection_set(self.selected_ip)
+                except Exception:
+                    pass
+                return self.selected_ip
+        return ""
 
     def _open_remote_desktop(self, fullscreen: bool = False):
         ip = self._get_selected_client_ip()
@@ -1994,6 +2024,12 @@ class MasterAppUI:
             if hasattr(self, "lic_agent_tree") and self.lic_agent_tree.exists(old_ip):
                 self.lic_agent_tree.delete(old_ip)
 
+        # 始终稳定保持当前选中的设备高亮，绝不丢失焦点
+        if hasattr(self, "selected_ip") and self.selected_ip and self.client_tree.exists(self.selected_ip):
+            cur = self.client_tree.selection()
+            if not cur or cur[0] != self.selected_ip:
+                self.client_tree.selection_set(self.selected_ip)
+
     def _update_client_row(self, client_ip: str, payload: dict):
         if not self.client_tree.exists(client_ip):
             self._refresh_client_tree()
@@ -2010,59 +2046,82 @@ class MasterAppUI:
         if not exp_desc:
             exp_desc = "永久有效" if lic_st == "ACTIVE" else "尚未授权"
 
-        self.client_tree.item(client_ip, text=client_ip, values=(disp_host, cpu, gpu, mem, fg))
+        # 仅在数据变化时更新 Treeview 行，避免不必要的界面抖动
+        cur_v = self.client_tree.item(client_ip, "values")
+        new_v = (disp_host, cpu, gpu, mem, fg)
+        if tuple(str(x) for x in cur_v) != tuple(str(x) for x in new_v):
+            self.client_tree.item(client_ip, text=client_ip, values=new_v)
 
         # 同时更新授权大厅
         if hasattr(self, "lic_agent_tree") and self.lic_agent_tree.exists(client_ip):
             req_c = payload.get("license", {}).get("request_code", "----")
             self.lic_agent_tree.item(client_ip, text=client_ip, values=(disp_host, req_c, auth_str, exp_desc))
 
-        # 若当前正选定该设备，即时同步刷新右侧的活动进程列表与选定状态看板！
-        if self.selected_ip == client_ip:
+        # 若当前正选定该设备，即时增量同步刷新右侧的活动进程列表与选定状态看板！
+        if getattr(self, "selected_ip", None) == client_ip:
             self.sel_host_lbl.set_text(
                 f"选定设备: {disp_host} ({client_ip})   |   系统: {payload.get('os', 'Windows')}   |   前台活动窗口: {fg}",
                 fg=self.ACCENT_CYAN
             )
-            # 实时同步进程树 (确保新启动的应用即时呈现，结束的进程即时消失)
+            if hasattr(self, "stream_url_var"):
+                self.stream_url_var.set(f"推流: vnc://{client_ip}:5900 | webrtc://{client_ip}:5900/live | http://{client_ip}:5901/stream.mjpg")
+
+            # 增量比对更新进程树 (Diff Update，杜绝每秒清空重建导致的闪烁和无法点击！)
             procs = payload.get("top_processes", [])
-            if procs:
-                cur_sel = self.proc_tree.selection()
-                cur_pid = cur_sel[0] if cur_sel else None
-                for i in self.proc_tree.get_children():
-                    self.proc_tree.delete(i)
-                for p in procs:
-                    sz_str = f"{p.get('memory_mb', 0)} MB"
-                    item_id = str(p.get("pid"))
-                    self.proc_tree.insert("", "end", iid=item_id, text=p.get("name"), values=(p.get("pid"), sz_str))
-                if cur_pid and self.proc_tree.exists(cur_pid):
+            cur_sel = self.proc_tree.selection()
+            cur_pid = cur_sel[0] if cur_sel else None
+            existing_pids = set(self.proc_tree.get_children())
+            new_pids = set()
+            for p in procs:
+                item_id = str(p.get("pid"))
+                new_pids.add(item_id)
+                p_name = p.get("name")
+                sz_str = f"{p.get('memory_mb', 0)} MB"
+                vals = (p.get("pid"), sz_str)
+                if item_id in existing_pids:
+                    old_vals = self.proc_tree.item(item_id, "values")
+                    if tuple(str(x) for x in old_vals) != tuple(str(x) for x in vals):
+                        self.proc_tree.item(item_id, text=p_name, values=vals)
+                else:
+                    self.proc_tree.insert("", "end", iid=item_id, text=p_name, values=vals)
+
+            for stale_id in existing_pids - new_pids:
+                self.proc_tree.delete(stale_id)
+
+            if cur_pid and self.proc_tree.exists(cur_pid):
+                if not self.proc_tree.selection() or self.proc_tree.selection()[0] != cur_pid:
                     self.proc_tree.selection_set(cur_pid)
 
-    def _on_udp_command_received(self, cmd_raw: str, addr: tuple, result: dict):
-        """接收第三方中控主机通过 UDP 9889 发送的集中调度指令"""
+    def _on_central_control_event(self, protocol: str, client_addr: str, cmd_raw: str, result: dict):
+        """统一接收外部集中智能中控多协议总线 (UDP/TCP/HTTP/串口) 调度事件"""
         def update_ui():
             msg = result.get("msg", result.get("error", "已执行"))
-            log_txt = f"🎮 [中控调度 UDP 9889] 来自 {addr[0]}:{addr[1]} -> 指令: {cmd_raw} | 执行结果: {msg}"
+            log_txt = f"🎮 [中控调度 {protocol}] 来自 {client_addr} -> 指令: {cmd_raw} | 执行结果: {msg}"
             self.notice_var.set(log_txt)
         self._safe_after(update_ui)
 
+    def _on_udp_command_received(self, cmd_raw: str, addr: tuple, result: dict):
+        addr_str = f"{addr[0]}:{addr[1]}" if addr else ""
+        self._on_central_control_event("UDP 9889", addr_str, cmd_raw, result)
+
     def open_udp_protocol_help_window(self):
-        """弹出展馆第三方集中智能中控 UDP 控制协议与指令说明手册"""
+        """弹出展馆第三方集中智能中控多协议 (UDP/TCP/HTTP/串口) 与视频推流 API 手册"""
         win = tk.Toplevel(self.root)
-        win.title("📖 展馆智能中控 UDP 调度接口命令速查手册 (Crestron / AMX / 华为 / 智能平板)")
-        win.geometry("900x640")
+        win.title("📖 展馆中控全协议 (UDP / TCP / HTTP API / 物理串口) 与推流速查手册")
+        win.geometry("940x680")
         win.configure(bg="#0f172a")
-        win.minsize(800, 560)
+        win.minsize(820, 600)
 
         ws = win.winfo_screenwidth()
         hs = win.winfo_screenheight()
-        win.geometry(f"900x640+{(ws-900)//2}+{(hs-640)//2}")
+        win.geometry(f"940x680+{(ws-940)//2}+{(hs-680)//2}")
 
         top_f = tk.Frame(win, bg="#1e293b", padx=16, pady=10)
         top_f.pack(fill=tk.X)
 
         tk.Label(
             top_f,
-            text="📡 展馆第三方集中中控 UDP 调度接口规范",
+            text="📡 展馆第三方智能中控多协议总线 (UDP/TCP/HTTP/串口) 与视频推流规范",
             font=("Segoe UI", 12, "bold"),
             bg="#1e293b",
             fg="#38bdf8"
@@ -2074,13 +2133,65 @@ class MasterAppUI:
         except Exception:
             local_ips = ["127.0.0.1"]
 
+        master_ip_show = local_ips[0] if local_ips else "127.0.0.1"
         tk.Label(
             top_f,
-            text=f"主控监听端口: UDP 9889   |   当前主控本机 IP: {', '.join(local_ips)}   |   支持字符串或 JSON 格式报文",
+            text=f"中控总线端口: UDP: 9889 | TCP: 9890 | HTTP API: 9891 | 串口 COM | 主控IP: {', '.join(local_ips)}",
             font=("Segoe UI", 9),
             bg="#1e293b",
             fg="#94a3b8"
         ).pack(anchor="w", pady=(2, 0))
+
+        # 串口物理中控快速开关面板
+        serial_bar = tk.LabelFrame(win, text=" 🔌 物理串口中控设置 (RS232/RS485/USB-TTL) ", bg="#1e293b", fg="#34d399", font=("Segoe UI", 8, "bold"), padx=10, pady=4)
+        serial_bar.pack(fill=tk.X, padx=8, pady=(6, 2))
+
+        tk.Label(serial_bar, text="COM端口:", font=("Segoe UI", 8), bg="#1e293b", fg="#cbd5e1").pack(side=tk.LEFT)
+        avail_ports = gwc_master.SerialCentralControlListener.list_available_ports()
+        combo_com = ttk.Combobox(serial_bar, values=avail_ports, width=10, state="readonly" if avail_ports else "normal", font=("Segoe UI", 8))
+        if avail_ports:
+            combo_com.current(0)
+        combo_com.pack(side=tk.LEFT, padx=4)
+
+        tk.Label(serial_bar, text="波特率:", font=("Segoe UI", 8), bg="#1e293b", fg="#cbd5e1").pack(side=tk.LEFT, padx=(6, 2))
+        combo_baud = ttk.Combobox(serial_bar, values=["9600", "19200", "38400", "57600", "115200"], width=8, state="readonly", font=("Segoe UI", 8))
+        combo_baud.set("9600")
+        combo_baud.pack(side=tk.LEFT, padx=4)
+
+        serial_st_lbl = tk.Label(serial_bar, text="● 串口未开启", font=("Segoe UI", 8), bg="#1e293b", fg="#94a3b8")
+        if self.master_hub.serial_controller.running:
+            serial_st_lbl.config(text=f"● 监听中: {self.master_hub.serial_controller.port_name}", fg="#10b981")
+
+        def toggle_serial():
+            if self.master_hub.serial_controller.running:
+                self.master_hub.serial_controller.stop()
+                serial_st_lbl.config(text="● 串口未开启", fg="#94a3b8")
+                btn_serial_toggle.config(text="开启串口监听", bg="#0284c7")
+                self.notice_var.set("已停止串口中控监听。")
+            else:
+                p_name = combo_com.get().strip()
+                b_val = int(combo_baud.get().strip() or "9600")
+                if not p_name:
+                    messagebox.showerror("错误", "请先选择需要监听的 COM 端口！", parent=win)
+                    return
+                ok, msg = self.master_hub.serial_controller.start(p_name, baudrate=b_val)
+                if ok:
+                    serial_st_lbl.config(text=f"● 监听中: {p_name} ({b_val})", fg="#10b981")
+                    btn_serial_toggle.config(text="停止串口监听", bg="#ef4444")
+                    self.notice_var.set(f"串口中控已成功启动: {p_name} (波特率 {b_val})")
+                    messagebox.showinfo("成功", f"物理串口中控已成功开启监听:\n端口: {p_name}\n波特率: {b_val}", parent=win)
+                else:
+                    messagebox.showerror("串口开启失败", msg, parent=win)
+
+        btn_serial_toggle = tk.Button(
+            serial_bar,
+            text="停止串口监听" if self.master_hub.serial_controller.running else "开启串口监听",
+            font=("Segoe UI", 8, "bold"),
+            bg="#ef4444" if self.master_hub.serial_controller.running else "#0284c7",
+            fg="#fff", relief="flat", padx=10, pady=1, cursor="hand2", command=toggle_serial
+        )
+        btn_serial_toggle.pack(side=tk.LEFT, padx=8)
+        serial_st_lbl.pack(side=tk.LEFT, padx=6)
 
         # 主体说明内容 (使用滚动文本框展现)
         txt = tk.Text(win, bg="#0b0f19", fg="#f8fafc", font=("Consolas", 9), padx=12, pady=10, relief="flat", wrap="none")
@@ -2090,103 +2201,81 @@ class MasterAppUI:
 
         txt_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         txt_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
 
-        doc_content = """# ==============================================================================
-# 🏛️ 展馆智能集群综合管控中心 · 第三方集中智能中控 UDP 指令协议规范
+        doc_content = f"""# ==============================================================================
+# 🏛️ 展馆智能集群综合管控中心 · 中控全协议 (UDP/TCP/HTTP/串口) 与视频推流 API
 # ==============================================================================
-# 适用硬件: 快思聪 (Crestron)、AMX、华为中控、台达、快捷、智能中控平板、普通物理按键网关等。
-# 通信协议: UDP (无连接极速响应，支持自动回发 ACK 确认包)
-# 默认端口: 9889 (向主控端电脑 IP 的 9889 端口发送数据包即可)
+# 兼容硬件: 快思聪 (Crestron)、AMX、华为/台达/快捷中控主机、触摸平板、网页Web中控、物理串口按键网关
+# 当前主控主机 IP: {master_ip_show}
+# 中控服务总线端口:
+#   • UDP 协议端口 : 9889 (向 {master_ip_show}:9889 发送无连接 UDP 报文)
+#   • TCP 协议端口 : 9890 (连接 {master_ip_show}:9890 发送以换行符 \\n 分隔的报文)
+#   • HTTP REST API: 9891 (访问 http://{master_ip_show}:9891/api/...)
+#   • 物理串口 COM : 可选 COM1/COM2... (波特率 9600/115200，\\r\\n 换行)
 # ==============================================================================
 
-一、全馆集中控制指令 (字符串模式 · 兼容传统中控主机):
+一、视频推流与实时桌面监看地址规范 (可在中控平板、大屏流媒体播放器、网页中无缝拉流):
 ------------------------------------------------------------------------------
-  1. ALL_SHUTDOWN
-     说明: 向全馆所有在线受控工控机发送一键安全关机指令。
-     示例: "ALL_SHUTDOWN"
+  每台工控机在局域网内拥有独立的 IP 地址，视频桌面推流拉流地址如下:
+  1. 原生 VNC 桌面控制流: vnc://<工控机IP>:5900 (例如 vnc://192.168.1.50:5900)
+  2. WebRTC 低延时监看流: webrtc://<工控机IP>:5900/live
+  3. HTTP MJPEG 实时画面流: http://<工控机IP>:5901/stream.mjpg (浏览器原生 <img> 直接播放)
+  4. RTSP 展厅监控流地址: rtsp://<工控机IP>:8554/live
 
-  2. ALL_REBOOT
-     说明: 向全馆所有在线受控工控机发送一键重启指令。
-     示例: "ALL_REBOOT"
-
-  3. ALL_MUTE
-     说明: 全馆所有工控机一键静音。
-     示例: "ALL_MUTE"
-
-  4. ALL_UNMUTE
-     说明: 全馆所有工控机一键解除静音。
-     示例: "ALL_UNMUTE"
-
-  5. ALL_VOLUME:<0-100>
-     说明: 全馆所有工控机统一设定音量百分比 (0 到 100)。
-     示例: "ALL_VOLUME:80"  (全馆音量调为 80%)
-
-  6. ALL_RUN:<可执行文件完整路径>
-     说明: 全馆所有工控机批量启动指定应用程序或脚本。
-     示例: "ALL_RUN:D:\\Exhibit\\ShowApp.exe"
-
-  7. PING
-     说明: 心跳与在线设备数查询，主控自动回包确认。
-     示例: "PING" -> 回包: "PONG:GWC_MASTER_HUB:ONLINE:8"
-
-二、单机精准调度指令 (根据工控机 IP 地址精准下发):
+二、HTTP RESTful Web API 接口规范 (浏览器 / 网页大屏 / 微信小程序 / curl 直接调用):
 ------------------------------------------------------------------------------
-  1. DEV_SHUTDOWN:<从机IP>
-     示例: "DEV_SHUTDOWN:192.168.1.50"  (关闭指定工控机)
+  1. 获取所有在线工控机清单及视频推流地址:
+     GET http://{master_ip_show}:9891/api/devices
+     响应: JSON 格式包含每台工控机名称、IP、CPU、GPU、内存、vnc_url、stream_url 等
 
-  2. DEV_REBOOT:<从机IP>
-     示例: "DEV_REBOOT:192.168.1.50"    (重启指定工控机)
+  2. 获取主控健康状态与在线工控机数量:
+     GET http://{master_ip_show}:9891/api/status
 
-  3. DEV_MUTE:<从机IP>
-     示例: "DEV_MUTE:192.168.1.50"      (静音/恢复指定工控机)
+  3. 网页/浏览器 URL 查询参数一键快速控制 (极为方便做成大屏超链接或按键触发):
+     • 全馆一键关机: GET http://{master_ip_show}:9891/api/control?action=all_shutdown
+     • 全馆一键重启: GET http://{master_ip_show}:9891/api/control?action=all_reboot
+     • 全馆统一音量: GET http://{master_ip_show}:9891/api/control?action=all_volume&volume=80
+     • 单机精准调音量: GET http://{master_ip_show}:9891/api/control?action=dev_volume&ip=192.168.1.50&volume=60
+     • 单机启动程序: GET http://{master_ip_show}:9891/api/control?action=dev_launch&ip=192.168.1.50&app_name=沙盘
 
-  4. DEV_VOLUME:<从机IP>:<音量值>
-     示例: "DEV_VOLUME:192.168.1.50:65" (设定该机音量为 65%)
+  4. POST 方式下发 JSON 控制报文:
+     POST http://{master_ip_show}:9891/api/control
+     Content-Type: application/json
+     Body: {{"action": "all_shutdown"}}
+     (支持跨域 CORS 头 Access-Control-Allow-Origin: *，Web 页面任意跨域调用)
 
-  5. DEV_RUN:<从机IP>:<程序路径>
-     示例: "DEV_RUN:192.168.1.50:D:\\Exhibit\\main.exe"
-
-  6. DEV_KILL:<从机IP>:<进程名或PID>
-     示例: "DEV_KILL:192.168.1.50:ShowApp.exe" (强制结束该应用)
-
-  7. SCAN_AGENTS
-     示例: "SCAN_AGENTS" (触发主控全网段雷达扫描受控从机)
-
-三、现代化智能平板与中控系统 (JSON 模式报文):
+三、UDP / TCP / 串口 指令集 (文本冒号分隔模式 · 快思聪 / AMX / 串口通用):
 ------------------------------------------------------------------------------
-  主控端同样原生支持直接发送标准 JSON 报文进行控制:
-  
-  示例 1: 全馆关机
-  {"cmd": "ALL_SHUTDOWN"}
+  1. ALL_SHUTDOWN           -> 全馆所有已接入工控机一键安全关机
+  2. ALL_REBOOT             -> 全馆所有已接入工控机一键安全重启
+  3. ALL_MUTE               -> 全馆所有工控机一键静音
+  4. ALL_UNMUTE             -> 全馆所有工控机解除静音
+  5. ALL_VOLUME:<0-100>     -> 统一全馆音量。示例: "ALL_VOLUME:80" (全馆设为 80%)
+  6. ALL_RUN:<程序路径或名称> -> 全馆工控机统一启动展项应用。示例: "ALL_RUN:D:\\Exhibit\\Show.exe"
+  7. DEV_SHUTDOWN:<从机IP>   -> 调度单台工控机关机。示例: "DEV_SHUTDOWN:192.168.1.50"
+  8. DEV_REBOOT:<从机IP>     -> 调度单台工控机重启。示例: "DEV_REBOOT:192.168.1.50"
+  9. DEV_VOLUME:<IP>:<0-100>-> 精准设定单机音量。示例: "DEV_VOLUME:192.168.1.50:65"
+  10. DEV_RUN:<IP>:<程序>   -> 调度单台启动应用。示例: "DEV_RUN:192.168.1.50:D:\\Show.exe"
+  11. DEV_KILL:<IP>:<进程名> -> 调度单台强杀异常进程。示例: "DEV_KILL:192.168.1.50:Show.exe"
+  12. PING                  -> 握手与心跳，主控即时回显在线总数。
 
-  示例 2: 全馆音量设为 75%
-  {"cmd": "ALL_VOLUME", "level": 75}
-
-  示例 3: 指定工控机启动展项程序
-  {"cmd": "DEV_RUN", "ip": "192.168.1.50", "path": "D:\\Ex\\run.exe", "args": "-fullscreen"}
-
-  示例 4: 结束指定工控机卡死进程
-  {"cmd": "DEV_KILL", "ip": "192.168.1.50", "name": "ShowApp.exe"}
-
-四、中控主机调用代码示例 (Python / 快思聪 / 网络调试助手):
+四、中控对接调用代码示例 (Python / 快思聪 / HTTP cURL):
 ------------------------------------------------------------------------------
-  # Python 快速测试示例:
+  [示例 1: HTTP cURL 命令行]
+  curl "http://{master_ip_show}:9891/api/control?action=all_volume&volume=85"
+
+  [示例 2: TCP Socket (快思聪 / Python)]
   import socket
-  sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  master_ip = "192.168.1.100"  # 主控端电脑 IP
-  master_port = 9889           # 主控端 UDP 端口
+  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  s.connect(("{master_ip_show}", 9890))
+  s.sendall(b"ALL_VOLUME:80\\n")
+  print("TCP反馈:", s.recv(1024).decode())
+  s.close()
 
-  # 发送全馆一键开馆/批量启动
-  sock.sendto(b"ALL_RUN:D:\\\\Exhibit\\\\main.exe", (master_ip, master_port))
-
-  # 接收主控端确认 ACK 回包
-  sock.settimeout(2.0)
-  try:
-      ack, _ = sock.recvfrom(1024)
-      print("收到主控反馈:", ack.decode("utf-8"))
-  except Exception as e:
-      print("等待响应超时:", e)
+  [示例 3: 物理串口发送 (RS232 / RS485)]
+  串口调试助手打开 COM3，波特率 9600，发送: "ALL_SHUTDOWN\\r\\n"
+  主控执行并回写: "ACK:已向全馆下发关机指令\\r\\n"
 """
         txt.insert("1.0", doc_content)
         txt.config(state="disabled")
@@ -2198,9 +2287,16 @@ class MasterAppUI:
         def copy_demo():
             self.root.clipboard_clear()
             self.root.clipboard_append("ALL_SHUTDOWN")
-            messagebox.showinfo("已复制", "已复制示例命令 [ALL_SHUTDOWN] 到剪贴板！", parent=win)
+            messagebox.showinfo("已复制", "已复制测试命令 [ALL_SHUTDOWN] 到剪贴板！", parent=win)
+
+        def copy_http_api():
+            u = f"http://{master_ip_show}:9891/api/devices"
+            self.root.clipboard_clear()
+            self.root.clipboard_append(u)
+            messagebox.showinfo("已复制", f"已复制 HTTP API 获取设备清单接口地址:\n{u}", parent=win)
 
         tk.Button(bot_bar, text="📋 复制关机测试命令 (ALL_SHUTDOWN)", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=10, pady=3, command=copy_demo).pack(side=tk.LEFT)
+        tk.Button(bot_bar, text="🌐 复制HTTP API接口地址", font=("Segoe UI", 9), bg="#059669", fg="#fff", relief="flat", padx=10, pady=3, command=copy_http_api).pack(side=tk.LEFT, padx=8)
         tk.Button(bot_bar, text="关闭窗口", font=("Segoe UI", 9), bg="#334155", fg="#fff", relief="flat", padx=12, pady=3, command=win.destroy).pack(side=tk.RIGHT)
 
     def _periodic_ui_refresh(self):
