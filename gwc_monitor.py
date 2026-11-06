@@ -21,6 +21,7 @@ import ctypes
 import socket
 import platform
 import subprocess
+import threading
 from datetime import datetime
 
 import gwc_system_ops
@@ -37,48 +38,128 @@ class HostStatusCollector:
     def __init__(self):
         self._last_net_bytes = None
         self._last_net_time = time.time()
-        self._prev_idle_time = 0
-        self._prev_kernel_time = 0
-        self._prev_user_time = 0
+        self._cached_cpu = 0.0
+        self._cached_gpu = 0.0
+        self._has_nvidia = None
+        self._nvidia_last_check = 0
+        self._pdh_query = None
+        self._pdh_counter = None
 
-    def get_cpu_percent(self) -> float:
-        """获取 CPU 实时使用率 (兼容 psutil 与 ctypes GetSystemTimes)"""
-        if HAS_PSUTIL:
-            try:
-                return round(psutil.cpu_percent(interval=None), 1)
-            except Exception:
-                pass
+        # 内存与 I/O 缓存 (大幅降低工控机磁盘读写与进程枚举开销)
+        self._cached_preset_apps = []
+        self._preset_apps_mtime = 0
+        self._cached_top_procs = []
+        self._procs_last_sample = 0
+
+        # 启动常驻高精度后台采样守护线程 (完全独立运行，彻底杜绝主网络循环阻塞)
+        self._sampler_thread = threading.Thread(target=self._bg_sampler_loop, daemon=True)
+        self._sampler_thread.start()
+
+    def _init_pdh_gpu(self):
+        """初始化 Windows 原生 PDH 性能计数器 (DirectX/3D 显卡利用率)"""
+        try:
+            pdh = ctypes.windll.pdh
+            h_query = ctypes.wintypes.HANDLE()
+            if pdh.PdhOpenQueryW(None, 0, ctypes.byref(h_query)) == 0:
+                h_counter = ctypes.wintypes.HANDLE()
+                # 监测 Windows 3D 引擎使用率
+                if pdh.PdhAddEnglishCounterW(h_query, r'\GPU Engine(*_engtype_3D)\Utilization Percentage', 0, ctypes.byref(h_counter)) == 0:
+                    self._pdh_query = h_query
+                    self._pdh_counter = h_counter
+                    pdh.PdhCollectQueryData(self._pdh_query)
+        except Exception:
+            self._pdh_query = None
+            self._pdh_counter = None
+
+    def _sample_gpu_pdh(self) -> float:
+        """通过 Windows PDH 毫秒级原生读取 GPU 实时占用 (免创建子进程，零延迟)"""
+        if not self._pdh_query:
+            self._init_pdh_gpu()
+        if not self._pdh_query:
+            return 0.0
 
         try:
-            class FILETIME(ctypes.Structure):
-                _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+            pdh = ctypes.windll.pdh
+            pdh.PdhCollectQueryData(self._pdh_query)
 
-            idle_time = FILETIME()
-            kernel_time = FILETIME()
-            user_time = FILETIME()
+            buf_sz = ctypes.wintypes.DWORD(0)
+            item_cnt = ctypes.wintypes.DWORD(0)
+            status = pdh.PdhGetFormattedCounterArrayW(self._pdh_counter, 0x00000200, ctypes.byref(buf_sz), ctypes.byref(item_cnt), None)
+            if (status == -2147481646 or status == 0x800007D2) and buf_sz.value > 0:
+                buf = ctypes.create_string_buffer(buf_sz.value)
+                status2 = pdh.PdhGetFormattedCounterArrayW(self._pdh_counter, 0x00000200, ctypes.byref(buf_sz), ctypes.byref(item_cnt), buf)
+                if status2 == 0 and item_cnt.value > 0:
+                    class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+                        _fields_ = [('CStatus', ctypes.wintypes.DWORD), ('doubleValue', ctypes.c_double)]
 
-            if ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle_time), ctypes.byref(kernel_time), ctypes.byref(user_time)):
-                def ft_to_int(ft):
-                    return (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+                    class PDH_FMT_COUNTERVALUE_ITEM_W(ctypes.Structure):
+                        _fields_ = [('szName', ctypes.wintypes.LPWSTR), ('FmtValue', PDH_FMT_COUNTERVALUE)]
 
-                i = ft_to_int(idle_time)
-                k = ft_to_int(kernel_time)
-                u = ft_to_int(user_time)
-
-                if self._prev_kernel_time > 0:
-                    usr = u - self._prev_user_time
-                    ker = k - self._prev_kernel_time
-                    idl = i - self._prev_idle_time
-                    sys_total = usr + ker
-                    if sys_total > 0:
-                        pct = round(((sys_total - idl) / sys_total) * 100, 1)
-                        self._prev_idle_time, self._prev_kernel_time, self._prev_user_time = i, k, u
-                        return max(0.0, min(100.0, pct))
-
-                self._prev_idle_time, self._prev_kernel_time, self._prev_user_time = i, k, u
+                    total_gpu = 0.0
+                    items = ctypes.cast(buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM_W))
+                    for i in range(item_cnt.value):
+                        v = items[i].FmtValue.doubleValue
+                        if v > 0:
+                            total_gpu += v
+                    return round(min(100.0, total_gpu), 1)
         except Exception:
             pass
         return 0.0
+
+    def _sample_gpu_nvidia(self) -> float:
+        """针对配备 NVIDIA 独立显卡的展馆主机进行精准探测 (增加探测冷却，彻底杜绝无卡机器频繁拉起子进程消耗 CPU)"""
+        now = time.time()
+        if self._has_nvidia is False:
+            if now - self._nvidia_last_check < 60.0:
+                return -1.0
+        self._nvidia_last_check = now
+        try:
+            out = subprocess.check_output(
+                ['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'],
+                timeout=0.3, stderr=subprocess.DEVNULL, creationflags=0x08000000
+            ).decode().strip()
+            if out:
+                self._has_nvidia = True
+                val = float(out.split('\n')[0].strip())
+                return round(val, 1)
+        except Exception:
+            self._has_nvidia = False
+        return -1.0
+
+    def _bg_sampler_loop(self):
+        """后台独立周期性精准采样 (1.0 秒标准窗口计算，完全匹配任务管理器)"""
+        if HAS_PSUTIL:
+            try:
+                psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
+
+        while True:
+            try:
+                # 1. 采集 CPU 使用率 (psutil 1.0 秒滑动窗口，精度 0.1%)
+                if HAS_PSUTIL:
+                    cpu_val = psutil.cpu_percent(interval=1.0)
+                    self._cached_cpu = round(max(0.0, min(100.0, float(cpu_val))), 1)
+                else:
+                    time.sleep(1.0)
+
+                # 2. 采集 GPU 使用率 (优先 NVIDIA，若无则使用原生 PDH 3D 利用率)
+                gpu_nv = self._sample_gpu_nvidia()
+                if gpu_nv >= 0.0:
+                    self._cached_gpu = gpu_nv
+                else:
+                    self._cached_gpu = self._sample_gpu_pdh()
+
+            except Exception:
+                time.sleep(1.0)
+
+    def get_gpu_percent(self) -> float:
+        """获取系统 GPU 实时使用率 (直接返回后台采样值，0 延迟)"""
+        return self._cached_gpu
+
+    def get_cpu_percent(self) -> float:
+        """获取 CPU 实时使用率 (直接返回后台采样值，精准对应任务管理器)"""
+        return self._cached_cpu
 
     def get_disks_status(self) -> list:
         """获取所有固定驱动器磁盘占用情况"""
@@ -209,20 +290,50 @@ class HostStatusCollector:
                 user32.CloseDesktop(hdesk)
         return ""
 
-    def collect_full_status(self, license_mgr=None) -> dict:
+    def collect_full_status(self, license_mgr=None, custom_name: str = "") -> dict:
         """
         全量组装当前主机状态字典
         """
+        if not custom_name:
+            try:
+                import gwc_desktop_helper as dh
+                cfg = dh.ConfigManager.load_config()
+                custom_name = cfg.get("custom_name", "")
+            except Exception:
+                pass
         # 1. 资源状态
         cpu = self.get_cpu_percent()
+        gpu = self.get_gpu_percent()
         mem = gwc_system_ops.get_system_memory()
         disks = self.get_disks_status()
         net_speed = self.get_network_speed()
 
+        # 读取受控端本地预设调用应用 (带 mtime 缓存，仅在修改时重新加载，避免心跳频繁读盘)
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            p_file = os.path.join(base_dir, "agent_preset_apps.json")
+            if os.path.exists(p_file):
+                mtime = os.path.getmtime(p_file)
+                if mtime != self._preset_apps_mtime:
+                    import json
+                    with open(p_file, "r", encoding="utf-8") as pf:
+                        self._cached_preset_apps = json.load(pf)
+                    self._preset_apps_mtime = mtime
+            else:
+                self._cached_preset_apps = []
+        except Exception:
+            pass
+        preset_apps = self._cached_preset_apps
+
         # 2. 活动窗口与软件
         fg_window = self.get_current_foreground_window()
         visible_apps = self.get_visible_windows()
-        top_procs = gwc_system_ops.list_running_processes()[:15]
+        # 采集前 50 项运行进程 (2 秒动态快照缓存，大幅减轻 CPU 负载)
+        now_t = time.time()
+        if now_t - self._procs_last_sample >= 2.0 or not self._cached_top_procs:
+            self._cached_top_procs = gwc_system_ops.list_running_processes()[:50]
+            self._procs_last_sample = now_t
+        top_procs = self._cached_top_procs
 
         # 3. 授权状态
         lic_info = {
@@ -233,10 +344,11 @@ class HostStatusCollector:
         if license_mgr:
             try:
                 ok, msg = license_mgr.check()
-                req = license_mgr.get_req_code()
+                req_fn = getattr(license_mgr, "get_req_code", getattr(license_mgr, "get_request_code", None))
+                req = req_fn() if req_fn else ""
                 lic_info["status"] = "ACTIVE" if ok else "UNLICENSED"
                 lic_info["request_code"] = req
-                exp = license_mgr.data.get("expire_time", 0)
+                exp = getattr(license_mgr, "data", {}).get("expire_time", 0)
                 if exp == -1:
                     lic_info["expire_desc"] = "永久有效"
                 elif exp > 0:
@@ -261,17 +373,20 @@ class HostStatusCollector:
                 pass
 
         return {
-            "hostname": platform.node(),
+            "hostname": custom_name or platform.node(),
+            "custom_name": custom_name,
             "ip": local_ip,
             "os": f"{platform.system()} {platform.release()}",
             "timestamp": int(time.time()),
             "cpu_percent": cpu,
+            "gpu_percent": gpu,
             "memory": mem,
             "disks": disks,
             "net_speed": net_speed,
             "foreground_window": fg_window,
             "visible_windows": visible_apps[:8],
             "top_processes": top_procs,
+            "preset_apps": preset_apps,
             "license": lic_info
         }
 
@@ -279,5 +394,5 @@ class HostStatusCollector:
 # 全局单例采集器
 _collector = HostStatusCollector()
 
-def get_host_status_report(license_mgr=None) -> dict:
-    return _collector.collect_full_status(license_mgr)
+def get_host_status_report(license_mgr=None, custom_name: str = "") -> dict:
+    return _collector.collect_full_status(license_mgr, custom_name=custom_name)

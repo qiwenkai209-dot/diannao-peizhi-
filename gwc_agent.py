@@ -39,18 +39,34 @@ UDP_DISCOVERY_PORT = 9887
 
 
 class GwcAgentClient:
-    def __init__(self, master_ip: str = "127.0.0.1", master_port: int = DEFAULT_MASTER_PORT, license_mgr=None):
+    def __init__(self, master_ip: str = "127.0.0.1", master_port: int = DEFAULT_MASTER_PORT, license_mgr=None, custom_name: str = ""):
         self.master_ip = master_ip
         self.master_port = master_port
         self.license_mgr = license_mgr
+        self.custom_name = custom_name.strip()
         self.running = False
         self.connected = False
         self.sock = None
         self._work_thread = None
         self._vnc_server = None
+        self._discovery_server = None
+        self.auto_discovery = True
         self.on_status_change = None  # 回调通知 UI
+        self.on_remote_authorized = None  # 远程授权激活成功回调通知 UI
 
-    def start(self, enable_rfb_vnc: bool = True):
+    def set_custom_name(self, name: str):
+        self.custom_name = name.strip()
+        if self._discovery_server:
+            self._discovery_server.agent_client = self
+        if self.sock and self.connected:
+            try:
+                status = gwc_monitor.get_host_status_report(self.license_mgr, custom_name=self.custom_name)
+                heartbeat = gwc_crypto.pack_packet("STATUS_REPORT", status)
+                self.sock.sendall(heartbeat)
+            except Exception:
+                pass
+
+    def start(self, enable_rfb_vnc: bool = True, enable_discovery: bool = True):
         """启动从机通信与受控代理"""
         if self.running:
             return
@@ -63,6 +79,14 @@ class GwcAgentClient:
             except Exception:
                 pass
 
+        if enable_discovery and self.auto_discovery:
+            try:
+                import gwc_discovery
+                self._discovery_server = gwc_discovery.AgentDiscoveryServer(agent_client=self, port=UDP_DISCOVERY_PORT)
+                self._discovery_server.start()
+            except Exception:
+                pass
+
         self._work_thread = threading.Thread(target=self._connection_loop, daemon=True)
         self._work_thread.start()
 
@@ -70,6 +94,12 @@ class GwcAgentClient:
         """停止从机服务"""
         self.running = False
         self.connected = False
+        if self._discovery_server:
+            try:
+                self._discovery_server.stop()
+            except Exception:
+                pass
+            self._discovery_server = None
         if self.sock:
             try:
                 self.sock.close()
@@ -80,11 +110,22 @@ class GwcAgentClient:
         if self.on_status_change:
             self.on_status_change(False, "服务已停止")
 
-    def set_master_address(self, ip: str, port: int = DEFAULT_MASTER_PORT):
-        self.master_ip = ip.strip()
-        self.master_port = int(port)
+    def set_master_address(self, ip: str, port: int = DEFAULT_MASTER_PORT, persist: bool = True):
+        ip = ip.strip()
+        port = int(port)
+        changed = (self.master_ip != ip or self.master_port != port)
+        self.master_ip = ip
+        self.master_port = port
+
+        if persist and changed:
+            try:
+                import gwc_desktop_helper as dh
+                dh.ConfigManager.save_config({"master_ip": self.master_ip, "master_port": self.master_port})
+            except Exception:
+                pass
+
         # 强制断开重连
-        if self.sock:
+        if changed and self.sock:
             try:
                 self.sock.close()
             except Exception:
@@ -100,13 +141,22 @@ class GwcAgentClient:
                 self.sock.settimeout(5.0)
                 self.sock.connect((self.master_ip, self.master_port))
                 self.sock.settimeout(None)
+
+                # 开启 TCP 链路 KeepAlive，防止长时间闲置中断
+                try:
+                    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+                        self.sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 6000, 1000))
+                except Exception:
+                    pass
+
                 self.connected = True
 
                 if self.on_status_change:
                     self.on_status_change(True, f"已连接主控 {self.master_ip}:{self.master_port}")
 
                 # 发送首次上线注册包
-                first_status = gwc_monitor.get_host_status_report(self.license_mgr)
+                first_status = gwc_monitor.get_host_status_report(self.license_mgr, custom_name=self.custom_name)
                 reg_pkt = gwc_crypto.pack_packet("AGENT_ONLINE", first_status)
                 self.sock.sendall(reg_pkt)
 
@@ -139,7 +189,7 @@ class GwcAgentClient:
 
                             try:
                                 msg = gwc_crypto.unpack_packet(frame)
-                                self._dispatch_master_command(msg)
+                                threading.Thread(target=self._dispatch_master_command, args=(msg,), daemon=True).start()
                             except Exception as ex:
                                 print(f"[-] 报文解密处理错误: {ex}")
 
@@ -147,15 +197,23 @@ class GwcAgentClient:
                     now = time.time()
                     if now - last_report_time >= 2.0:
                         last_report_time = now
-                        status = gwc_monitor.get_host_status_report(self.license_mgr)
+                        status = gwc_monitor.get_host_status_report(self.license_mgr, custom_name=self.custom_name)
                         heartbeat = gwc_crypto.pack_packet("STATUS_REPORT", status)
                         self.sock.sendall(heartbeat)
 
             except Exception as e:
                 self.connected = False
+                err_str = str(e)
+                if any(code in err_str for code in ["10053", "10054", "10061", "10060", "refused", "aborted", "reset"]):
+                    friendly_desc = f"待命监听中 (主控离线，等待重连 {self.master_ip}:{self.master_port})"
+                elif "timed out" in err_str:
+                    friendly_desc = f"等待主控响应 ({self.master_ip}:{self.master_port})"
+                else:
+                    friendly_desc = f"等待连接主控 ({self.master_ip}:{self.master_port})"
+
                 if self.on_status_change:
-                    self.on_status_change(False, f"未连接: {e}")
-                time.sleep(3.0)
+                    self.on_status_change(False, friendly_desc)
+                time.sleep(2.5)
             finally:
                 if self.sock:
                     try:
@@ -165,7 +223,7 @@ class GwcAgentClient:
                 self.connected = False
 
     def _dispatch_master_command(self, msg: dict):
-        """分发执行来自主控的加密指令"""
+        """分发执行来自主控的加密指令 (工作线程独立执行，毫秒级响应)"""
         m_type = msg.get("type")
         payload = msg.get("payload", {})
         req_id = payload.get("req_id", "")
@@ -173,7 +231,11 @@ class GwcAgentClient:
         resp_payload = {"req_id": req_id, "success": True}
 
         try:
-            if m_type == "CMD_SHUTDOWN":
+            if m_type == "CMD_GET_STATUS":
+                status = gwc_monitor.get_host_status_report(self.license_mgr, custom_name=self.custom_name)
+                resp_payload.update(status)
+
+            elif m_type == "CMD_SHUTDOWN":
                 ok, out = gwc_system_ops.remote_shutdown(force=payload.get("force", True), timeout=payload.get("timeout", 0))
                 resp_payload.update({"success": ok, "msg": out})
 
@@ -201,17 +263,28 @@ class GwcAgentClient:
                 resp_payload.update(res)
 
             elif m_type == "CMD_REMOTE_AUTH":
-                # 主控远程下发国文创激活码
+                # 主控远程下发专属激活码
                 act_code = payload.get("code", "")
                 if self.license_mgr:
                     ok, msg_txt = self.license_mgr.activate(act_code)
                     resp_payload.update({"success": ok, "msg": msg_txt})
+                    if ok and self.on_remote_authorized:
+                        try:
+                            self.on_remote_authorized(act_code, msg_txt)
+                        except Exception:
+                            pass
                 else:
-                    # 尝试动态加载并核销
                     try:
-                        from universal_license_core import decode_license
-                        dec = decode_license(act_code)
-                        resp_payload.update({"success": dec["valid"], "msg": dec.get("error", "激活码校验成功")})
+                        import gwc_license_terminal as lt
+                        mgr = lt.TerminalLicenseManager()
+                        ok, msg_txt = mgr.activate(act_code)
+                        self.license_mgr = mgr
+                        resp_payload.update({"success": ok, "msg": msg_txt})
+                        if ok and self.on_remote_authorized:
+                            try:
+                                self.on_remote_authorized(act_code, msg_txt)
+                            except Exception:
+                                pass
                     except Exception as ex:
                         resp_payload.update({"success": False, "error": str(ex)})
 

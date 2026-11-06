@@ -116,6 +116,12 @@ def deep_clean_working_set() -> dict:
     return {"cleaned_processes": cleaned_count, "failed_processes": failed_count}
 
 
+def deep_clean_empty_working_set() -> int:
+    """深度清空工作集 (兼容旧接口，返回已清理进程数)"""
+    res = deep_clean_working_set()
+    return res.get("cleaned_processes", 0)
+
+
 def clean_system_temp() -> dict:
     """扫描并清理 Windows 临时垃圾文件"""
     temp_dirs = []
@@ -143,6 +149,18 @@ def clean_system_temp() -> dict:
         except Exception:
             pass
     return {"deleted_files": deleted_files, "freed_mb": round(total_bytes / (1024 * 1024), 2)}
+
+
+def clean_system_temp_files() -> tuple:
+    """清理 Windows 临时垃圾 (兼容接口，返回 (删除文件数, 释放MB))"""
+    res = clean_system_temp()
+    return res.get("deleted_files", 0), res.get("freed_mb", 0.0)
+
+
+def scan_network_adapters() -> list:
+    """扫描网络适配器列表 (兼容字典格式)"""
+    names = get_network_adapters()
+    return [{"name": n} for n in names]
 
 
 # ==================== 网络适配器与 IPv4 配置 ====================
@@ -173,7 +191,7 @@ def get_network_adapters() -> list:
 
 
 def read_adapter_ipv4(adapter_name: str) -> dict:
-    """读取指定适配器的 IPv4 配置信息"""
+    """读取指定适配器的 IPv4 配置信息 (优先自动精准获取子网掩码，无则默认 255.255.255.0)"""
     info = {
         "adapter": adapter_name,
         "dhcp": True,
@@ -183,6 +201,22 @@ def read_adapter_ipv4(adapter_name: str) -> dict:
         "dns1": "",
         "dns2": ""
     }
+
+    # 1. 优先尝试使用 psutil 获取系统原生底层真实的 IPv4 和子网掩码
+    try:
+        import psutil
+        addrs = psutil.net_if_addrs()
+        if adapter_name in addrs:
+            for snic in addrs[adapter_name]:
+                if getattr(snic, "family", None) == socket.AF_INET:
+                    if snic.address and not snic.address.startswith("127."):
+                        info["ip"] = snic.address
+                    if snic.netmask and snic.netmask not in ["0.0.0.0", ""]:
+                        info["mask"] = snic.netmask
+    except Exception:
+        pass
+
+    # 2. 读取 netsh 配置信息 (补充网关、DHCP状态及 DNS)
     ok, out = run_cmd(f'netsh interface ipv4 show addresses name="{adapter_name}"')
     if ok and out:
         if "DHCP enabled:                         Yes" in out or "DHCP 已启用:                          是" in out:
@@ -190,15 +224,32 @@ def read_adapter_ipv4(adapter_name: str) -> dict:
         elif "DHCP enabled:                         No" in out or "DHCP 已启用:                          否" in out:
             info["dhcp"] = False
 
-        m_ip = re.search(r"(?:IP Address|IP 地址|IPv4 地址)[^\d]*([\d\.]+)", out)
-        if m_ip:
-            info["ip"] = m_ip.group(1).strip()
-        m_mask = re.search(r"(?:Subnet Prefix|子网前缀|子网掩码)[^\d]*([\d\.]+)", out)
-        if m_mask:
+        if not info["ip"]:
+            m_ip = re.search(r"(?:IP Address|IP 地址|IPv4 地址)[^\d]*([\d\.]+)", out)
+            if m_ip:
+                info["ip"] = m_ip.group(1).strip()
+
+        # 优先提取括号内的真实子网掩码: (mask 255.255.255.0) 或 (掩码 255.255.255.0)
+        m_mask = re.search(r"(?:mask|掩码)[^\d]*([\d\.]+)", out, re.IGNORECASE)
+        if m_mask and m_mask.group(1).count(".") == 3:
             info["mask"] = m_mask.group(1).strip()
+        elif not info["mask"] or info["mask"] == "0.0.0.0":
+            # 兼容 CIDR / 前缀换算
+            m_prefix = re.search(r"(?:Subnet Prefix|子网前缀|子网掩码)[^\d]*([\d\.]+)/(\d+)", out)
+            if m_prefix:
+                prefix_len = int(m_prefix.group(2))
+                mask_int = (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF
+                info["mask"] = f"{(mask_int >> 24) & 0xFF}.{(mask_int >> 16) & 0xFF}.{(mask_int >> 8) & 0xFF}.{mask_int & 0xFF}"
+            else:
+                info["mask"] = "255.255.255.0"
+
         m_gw = re.search(r"(?:Default Gateway|默认网关)[^\d]*([\d\.]+)", out)
         if m_gw:
             info["gateway"] = m_gw.group(1).strip()
+
+    # 兜底确保掩码非空
+    if not info.get("mask") or info["mask"] == "0.0.0.0":
+        info["mask"] = "255.255.255.0"
 
     ok_dns, out_dns = run_cmd(f'netsh interface ipv4 show dnsservers name="{adapter_name}"')
     if ok_dns and out_dns:
@@ -453,80 +504,247 @@ def remote_reboot(force: bool = True, timeout: int = 0) -> tuple:
 
 def remote_volume_control(action: str = "set", level: int = 50) -> dict:
     """
-    远程系统主音量控制
-    action: "set" (设置音量 0-100), "mute" (静音/取消静音), "up", "down"
+    远程系统主音量控制 (优先使用 Windows CoreAudio 原生接口，毫秒级绝对百分比精确设置)
     """
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ('Data1', ctypes.c_ulong),
+                ('Data2', ctypes.c_ushort),
+                ('Data3', ctypes.c_ushort),
+                ('Data4', ctypes.c_byte * 8)
+            ]
+            def __init__(self, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8):
+                self.Data1 = l
+                self.Data2 = w1
+                self.Data3 = w2
+                self.Data4 = (ctypes.c_byte * 8)(b1, b2, b3, b4, b5, b6, b7, b8)
+
+        CLSID_MMDeviceEnumerator = GUID(0xBCDE0395, 0xE52F, 0x467C, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E)
+        IID_IMMDeviceEnumerator = GUID(0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6)
+        IID_IAudioEndpointVolume = GUID(0x5CDF2C82, 0x841E, 0x4546, 0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A)
+
+        ctypes.windll.ole32.CoInitialize(None)
+        enumerator = ctypes.c_void_p()
+        hr = ctypes.windll.ole32.CoCreateInstance(
+            ctypes.byref(CLSID_MMDeviceEnumerator), None, 1,
+            ctypes.byref(IID_IMMDeviceEnumerator), ctypes.byref(enumerator)
+        )
+        if hr == 0 and enumerator.value:
+            enum_vtable = ctypes.cast(ctypes.cast(enumerator, ctypes.POINTER(ctypes.c_void_p)).contents, ctypes.POINTER(ctypes.c_void_p))
+            GetDefaultAudioEndpoint_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(enum_vtable[4])
+
+            device = ctypes.c_void_p()
+            if GetDefaultAudioEndpoint_fn(enumerator, 0, 1, ctypes.byref(device)) == 0 and device.value:
+                dev_vtable = ctypes.cast(ctypes.cast(device, ctypes.POINTER(ctypes.c_void_p)).contents, ctypes.POINTER(ctypes.c_void_p))
+                Activate_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))(dev_vtable[3])
+
+                endpoint_vol = ctypes.c_void_p()
+                if Activate_fn(device, ctypes.byref(IID_IAudioEndpointVolume), 23, None, ctypes.byref(endpoint_vol)) == 0 and endpoint_vol.value:
+                    vol_vtable = ctypes.cast(ctypes.cast(endpoint_vol, ctypes.POINTER(ctypes.c_void_p)).contents, ctypes.POINTER(ctypes.c_void_p))
+
+                    if action == "set":
+                        level = max(0, min(100, int(level)))
+                        scalar = float(level) / 100.0
+                        SetVol_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_float, ctypes.c_void_p)(vol_vtable[7])
+                        SetVol_fn(endpoint_vol, scalar, None)
+                        # 设置音量时自动解除静音
+                        SetMute_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_bool, ctypes.c_void_p)(vol_vtable[14])
+                        SetMute_fn(endpoint_vol, False, None)
+                        return {"success": True, "action": "set", "level": level, "msg": f"系统主音量已精准设为 {level}%"}
+
+                    elif action in ("mute", "toggle_mute"):
+                        GetMute_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool))(vol_vtable[15])
+                        is_muted = ctypes.c_bool()
+                        GetMute_fn(endpoint_vol, ctypes.byref(is_muted))
+                        new_mute = not is_muted.value
+                        SetMute_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_bool, ctypes.c_void_p)(vol_vtable[14])
+                        SetMute_fn(endpoint_vol, new_mute, None)
+                        return {"success": True, "action": "mute", "is_muted": new_mute, "msg": "已开启静音" if new_mute else "已解除静音"}
+    except Exception:
+        pass
+
+    # 降级备用方案: 模拟键盘调节
     user32 = ctypes.windll.user32
     VK_VOLUME_MUTE = 0xAD
     VK_VOLUME_DOWN = 0xAE
     VK_VOLUME_UP = 0xAF
-
     def press_key(vk):
         user32.keybd_event(vk, 0, 0, 0)
-        time.sleep(0.002)
         user32.keybd_event(vk, 0, 2, 0)
-        time.sleep(0.002)
 
     try:
-        if action == "mute" or action == "toggle_mute":
+        if action in ("mute", "toggle_mute"):
             press_key(VK_VOLUME_MUTE)
             return {"success": True, "action": "mute", "msg": "已切换静音状态"}
-        elif action == "up":
-            for _ in range(5):
-                press_key(VK_VOLUME_UP)
-            return {"success": True, "action": "up", "msg": "音量增加"}
-        elif action == "down":
-            for _ in range(5):
-                press_key(VK_VOLUME_DOWN)
-            return {"success": True, "action": "down", "msg": "音量减少"}
         elif action == "set":
             level = max(0, min(100, int(level)))
-            # Windows 每次 VOLUME_DOWN/UP 调整 2% 音量
-            # 先连续向下归零，再向上提升
-            for _ in range(52):
-                press_key(VK_VOLUME_DOWN)
-            steps_up = level // 2
-            for _ in range(steps_up):
-                press_key(VK_VOLUME_UP)
-            return {"success": True, "action": "set", "level": level, "msg": f"音量已设为 {level}%"}
+            for _ in range(50): press_key(VK_VOLUME_DOWN)
+            for _ in range(level // 2): press_key(VK_VOLUME_UP)
+            return {"success": True, "action": "set", "level": level, "msg": f"音量设为 {level}%"}
     except Exception as e:
         return {"success": False, "error": str(e)}
     return {"success": False, "error": "未知音量指令"}
 
 
 def remote_run_app(app_path: str, args: str = "", workdir: str = "") -> dict:
-    """远程启动指定应用程序或命令"""
-    app_path = app_path.strip()
+    """远程极速启动应用程序 (独立进程组与桌面分离，自动展开环境变量与工作目录，零阻塞即刻返回)"""
+    app_path = os.path.expandvars(app_path.strip().strip('"'))
     if not app_path:
         return {"success": False, "error": "应用程序路径不能为空"}
 
-    try:
-        if workdir and not os.path.isdir(workdir):
-            workdir = os.path.dirname(app_path) if os.path.isfile(app_path) else None
+    # 快捷方式 (.lnk) 智能解析与重定向
+    if app_path.lower().endswith(".lnk") and os.path.isfile(app_path):
+        try:
+            # 优先使用 Windows PowerShell 极速解析快捷方式真实物理目标
+            ps_cmd = f'(New-Object -COM WScript.Shell).CreateShortcut("{app_path}").TargetPath'
+            out = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps_cmd], timeout=1.0, creationflags=0x08000000).decode("gbk", errors="ignore").strip()
+            if out and os.path.exists(out):
+                app_path = out
+        except Exception:
+            pass
 
-        cmd_line = f'"{app_path}" {args}'.strip() if args else f'"{app_path}"'
-        proc = subprocess.Popen(
-            cmd_line,
-            shell=True,
-            cwd=workdir if workdir and os.path.isdir(workdir) else None
+    # 自动推导工作目录：很多工控播控程序必须在自身目录下才能正确加载资源
+    if not workdir or not os.path.isdir(workdir):
+        if os.path.isfile(app_path):
+            workdir = os.path.dirname(os.path.abspath(app_path))
+        else:
+            workdir = os.getcwd()
+
+    # 优先使用 Windows 原生 ShellExecuteW 桌面环境独立启动 (完全继承当前桌面交互会话)
+    try:
+        shell32 = ctypes.windll.shell32
+        res = shell32.ShellExecuteW(
+            None,
+            "open",
+            app_path,
+            args.strip() if args else None,
+            workdir if workdir else None,
+            1  # SW_SHOWNORMAL
         )
-        return {"success": True, "pid": proc.pid, "msg": f"已成功启动应用: {app_path} (PID: {proc.pid})"}
+        if res > 32:
+            return {"success": True, "msg": f"已成功启动: {os.path.basename(app_path)}", "path": app_path}
+    except Exception:
+        pass
+
+    # 方案二：通过独立进程组极速分离启动 (零延迟、不阻塞当前服务通道)
+    try:
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        cmd_str = f'"{app_path}" {args}'.strip() if args else f'"{app_path}"'
+        p = subprocess.Popen(
+            cmd_str,
+            cwd=workdir,
+            shell=True,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
+        )
+        return {"success": True, "pid": p.pid, "msg": f"已启动: {os.path.basename(app_path)} (PID: {p.pid})"}
     except Exception as e:
-        return {"success": False, "error": f"启动应用失败: {e}"}
+        return {"success": False, "error": f"调用应用失败: {e}"}
 
 
 def remote_kill_process(pid: int = None, name: str = None) -> dict:
-    """远程终止指定进程 (支持 PID 或进程名)"""
-    if pid is not None and int(pid) > 4:
-        ok, out = run_cmd(f"taskkill /f /pid {pid}")
-        return {"success": ok, "msg": f"终止 PID {pid}: {out}"}
-    elif name:
+    """远程终止指定进程 (psutil 子进程树递归强杀 + Win32 TerminateProcess + taskkill 兜底)"""
+    killed = False
+    details = []
+
+    # 1. 优先使用 psutil 强杀 PID 及其所有递归子进程树 (毫秒级响应)
+    if pid is not None:
+        try:
+            pid_int = int(pid)
+            if pid_int > 4:
+                try:
+                    import psutil
+                    if psutil.pid_exists(pid_int):
+                        p = psutil.Process(pid_int)
+                        # 递归终结所有派生子进程
+                        for child in p.children(recursive=True):
+                            try:
+                                child.kill()
+                            except Exception:
+                                pass
+                        p.kill()
+                        killed = True
+                        details.append(f"psutil PID {pid_int}")
+                    else:
+                        killed = True
+                        details.append(f"PID {pid_int} 之前已退出")
+                except Exception:
+                    pass
+
+                # Win32 TerminateProcess 辅助强杀
+                try:
+                    kernel32 = ctypes.windll.kernel32
+                    h_proc = kernel32.OpenProcess(0x0001, False, pid_int)  # PROCESS_TERMINATE
+                    if h_proc:
+                        kernel32.TerminateProcess(h_proc, 1)
+                        kernel32.CloseHandle(h_proc)
+                        killed = True
+                        details.append(f"Win32 Terminate PID {pid_int}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # 2. 如果提供了进程名，按名称全量扫描杀进程
+    if name:
         proc_name = name.strip()
         if not proc_name.lower().endswith(".exe"):
             proc_name += ".exe"
-        ok, out = run_cmd(f'taskkill /f /im "{proc_name}"')
-        return {"success": ok, "msg": f"终止进程 {proc_name}: {out}"}
-    return {"success": False, "error": "未提供有效的 PID 或进程名"}
+        try:
+            import psutil
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    if p.name().lower() == proc_name.lower():
+                        for child in p.children(recursive=True):
+                            try: child.kill()
+                            except Exception: pass
+                        p.kill()
+                        killed = True
+                        details.append(f"psutil IM {proc_name}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # 3. 兜底 taskkill 强杀
+    if not killed and (pid or name):
+        try:
+            if pid:
+                run_cmd(f"taskkill /F /T /PID {pid}")
+            if name:
+                run_cmd(f'taskkill /F /T /IM "{proc_name}"')
+            killed = True
+            details.append("Taskkill 兜底执行")
+        except Exception:
+            pass
+
+    if killed:
+        return {"success": True, "msg": f"进程已成功终止: {', '.join(details)}"}
+    else:
+        return {"success": False, "error": f"未能找到或终止进程 (PID: {pid}, Name: {name})"}
+
+
+def ensure_single_instance(mutex_name: str) -> bool:
+    """
+    进程单实例互斥保护。
+    若已有相同互斥体存在，返回 False。
+    """
+    kernel32 = ctypes.windll.kernel32
+    # 尝试创建命名互斥体
+    mutex = kernel32.CreateMutexW(None, False, mutex_name)
+    last_error = kernel32.GetLastError()
+    # 183 = ERROR_ALREADY_EXISTS
+    if last_error == 183:
+        if mutex:
+            kernel32.CloseHandle(mutex)
+        return False
+    globals()["__GWC_INSTANCE_MUTEX__"] = mutex
+    return True
 
 
 def list_running_processes() -> list:

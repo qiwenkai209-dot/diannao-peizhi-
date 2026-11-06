@@ -38,17 +38,26 @@ jobs:
       - name: 检查并准备发布文件
         run: |
           dir dist\
-          if (-not (Test-Path "dist\展馆系统配置与网络设置及电脑优化工具.exe")) {
-            Write-Error "构建输出文件未找到！"
+          if (-not (Test-Path "dist\展馆控制终端.exe")) {
+            Write-Error "受控端构建输出文件未找到！"
             exit 1
           }
-          Copy-Item "dist\展馆系统配置与网络设置及电脑优化工具.exe" -Destination "dist\Museum_Config_Tool.exe"
+          if (-not (Test-Path "dist\展馆智能集群主控端.exe")) {
+            Write-Error "主控端构建输出文件未找到！"
+            exit 1
+          }
+          Copy-Item "dist\展馆控制终端.exe" -Destination "dist\GWC_Agent_Client.exe"
+          Copy-Item "dist\展馆智能集群主控端.exe" -Destination "dist\GWC_Master_Hub.exe"
 
       - name: 上传构建成果物 (Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: 展馆系统配置与网络设置及电脑优化工具-国文创双模版
-          path: dist/展馆系统配置与网络设置及电脑优化工具.exe
+          name: 展馆智能集群主控与控制终端独立套件-国文创版
+          path: |
+            dist/展馆控制终端.exe
+            dist/展馆智能集群主控端.exe
+            dist/GWC_Agent_Client.exe
+            dist/GWC_Master_Hub.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -56,33 +65,34 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v2.0.0' }}
-          name: 展馆系统配置与网络设置及电脑优化工具 v2.0 (双模工控中控版)
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v2.2.0' }}
+          name: 展馆智能集群管控系统 v2.2 (智能主控端 + 展馆控制终端)
           body: |
-            ## 🏛️ 展馆系统配置与网络设置及电脑优化工具 · 国文创商业双模版 v2.0
+            ## 🏛️ 展馆智能集群管控系统 · 国文创主控与受控终端独立双软件版 v2.2
 
             ### 🌟 本次全新升级特性：
-            1. **双功能架构 (单机优化 + 主控综合管理)**：
-               - **工控单机模式**：网络适配器 IPv4 配置、展馆策略全套管控 (ALLON/ALLOFF)、内存深度清空释放、网络深度重置、启动项/右键管理。
-               - **主控综合管理模式**：多机集中监控看板，实时掌握全展馆工控机状态。
-            2. **系统一键备份与恢复**：
-               - 单机支持完整导出系统配置、策略、启动项及预装软件环境为 `.gwcbackup` 备份包，支持一键还原恢复。
-               - 备份包支持实时上传至主控集中存储归档；主控支持一键向单机或批量工控机下发备份并自动触发还原！
-            3. **嵌入开源 VNC 远程控制与双向文件传输**：
-               - 内置标准 VNC RFB 3.8 服务 (支持 UltraVNC/TightVNC/RealVNC 直连 5900 端口)。
-               - 主控端提供原生内嵌远程桌面控制窗口与双栏文件管理器，流畅实现远程桌面操作与大文件跨机互传！
-            4. **实时状态监控与中控全权调度**：
-               - 从机定时上报 CPU、内存、磁盘占用、实时网络速率、当前前台活动窗口及运行中的软件进程。
-               - 主控端支持远程一键关机、远程重启、精准音量控制 (数值调节/静音)、远程应用调用启动、远程异常进程强制结束 (Kill)。
-            5. **国文创加密机通信与远程免密授权**：
-               - 主从机所有 TCP 指令、心跳数据、文件互传均通过国文创 HMAC-SHA256 CTR 流式加密机全包加密。
-               - 从机支持将 8 位申请码上报主控，主控管理员在监控大厅可【一键远程签发并激活】，从机即刻核销解锁，免除现场逐机手工输入的繁琐！
+            1. **控制终端（受控端）界面结构与调度全面进化**：
+               - **预设应用开机自启与延时启动置顶常驻**：无需繁琐折叠，直接在最上方表格直观勾选开机自启、设定延时秒数、一键测试启动。
+               - **界面大气极简，其他功能统合折叠**：运行模式/全局热键、集群连接状态与 TCP/UDP/VNC 端口标注、专属商业授权统筹收纳，保持工作台清爽高效。
+               - **极致轻量化守护**：优化显卡探针与高频磁盘读取缓存，空闲时极低系统资源占用，工控机长时间运行稳定如磐石。
+            2. **第三方智能中控专享 UDP 控制协议**：
+               - 主控端新增专用 **UDP 9889** 控制接口，原生兼容快思聪（Crestron）、AMX、华为中控、智能平板及 Python 脚本等第三方集中中控硬件。
+               - 支持纯文本与 JSON 双协议指令，涵盖全馆一键关机、重启、静音、统一音量、预设应用启动与单机精准控制，并支持 ACK 自动应答。
+               - 主控端内置【📖 中控UDP指令手册】速查与即时跑马灯调度回显。
+            3. **新一代商业授权与远程签发**：
+               - 支持按小时、月度、永久自定义时间灵活授权；
+               - 未授权/到期顶层强提醒，主控端商业授权中枢支持远程一键签发并实时自动热更新受控端，无需现场逐台敲码。
+            4. **局域网集群监控与精细化运维**：
+               - 自定义工控机名称、CPU/GPU 实时占用精确监控；
+               - 远程工作目录指定、双向文件上传/下载/删除管理、远程一键备份与自动恢复。
 
             ### 📦 发布文件说明：
-            - `展馆系统配置与网络设置及电脑优化工具.exe`: 原生单文件受保护可执行程序 (内置管理员 UAC 提权)。
-            - `Museum_Config_Tool.exe`: 英文命名兼容副本。
+            - `展馆控制终端.exe` / `GWC_Agent_Client.exe`: 部署在各展厅工控机，预设应用置顶自启延时管理、轻量守护、开机自启、快捷键呼出。
+            - `展馆智能集群主控端.exe` / `GWC_Master_Hub.exe`: 部署在总控电脑，在线终端雷达发现、全馆监控大厅、第三方UDP中控调度中枢。
           files: |
-            dist/展馆系统配置与网络设置及电脑优化工具.exe
-            dist/Museum_Config_Tool.exe
+            dist/展馆控制终端.exe
+            dist/展馆智能集群主控端.exe
+            dist/GWC_Agent_Client.exe
+            dist/GWC_Master_Hub.exe
           draft: false
           prerelease: false

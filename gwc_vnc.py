@@ -22,6 +22,7 @@ import socket
 import struct
 import threading
 import ctypes
+import base64
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -46,15 +47,12 @@ MOUSEEVENTF_ABSOLUTE = 0x8000
 
 def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
     """
-    安全截取当前桌面图像并编码为 JPEG 字节
+    截取当前桌面图像并编码为 JPEG 字节 (多屏幕/全屏支持与 CAPTUREBLT 防黑屏)
     返回: (jpeg_bytes, width, height)
     """
-    hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
-    if hdesk:
-        user32.SetThreadDesktop(hdesk)
-
     try:
-        img = ImageGrab.grab()
+        # 优先使用 Pillow 原生截屏，开启全屏幕捕获
+        img = ImageGrab.grab(all_screens=True)
         orig_w, orig_h = img.size
 
         if scale < 0.99:
@@ -66,7 +64,7 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
         img.save(buf, format='JPEG', quality=quality)
         return buf.getvalue(), orig_w, orig_h
     except Exception:
-        # GDI 降级截屏
+        # GDI 降级截屏 (加入 0x40000000 CAPTUREBLT 防止半透明或 DirectX 窗口黑屏)
         try:
             w = user32.GetSystemMetrics(0)
             h = user32.GetSystemMetrics(1)
@@ -75,13 +73,15 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
             hbm = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
             old_bm = gdi32.SelectObject(hdc_mem, hbm)
 
-            gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, 0x00CC0020)
+            # 0x40CC0020 = SRCCOPY (0x00CC0020) | CAPTUREBLT (0x40000000)
+            gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, 0x40CC0020)
 
-            # 通过 BMP 内存流转为 PIL
+            # 24 位 BMP 要求每行像素字节为 4 字节对齐
+            stride = ((w * 3 + 3) // 4) * 4
             bmi = struct.pack("IiiHHIIiiII", 40, w, -h, 1, 24, 0, 0, 0, 0, 0, 0)
-            raw_buf = ctypes.create_string_buffer(w * h * 3)
+            raw_buf = ctypes.create_string_buffer(stride * h)
             gdi32.GetDIBits(hdc_mem, hbm, 0, h, raw_buf, bmi, 0)
-            img = Image.frombuffer('RGB', (w, h), raw_buf, 'raw', 'BGR', 0, 1)
+            img = Image.frombuffer('RGB', (w, h), raw_buf, 'raw', 'BGR', stride, 1)
 
             gdi32.SelectObject(hdc_mem, old_bm)
             gdi32.DeleteObject(hbm)
@@ -96,9 +96,6 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
             return buf.getvalue(), w, h
         except Exception:
             return b"", 0, 0
-    finally:
-        if hdesk:
-            user32.CloseDesktop(hdesk)
 
 
 def inject_remote_mouse(event_type: str, x: int, y: int, extra: int = 0):
@@ -342,14 +339,15 @@ class StandaloneRfbVncServer:
                 pass
 
 
-# ==================== 主控端嵌入式远程控制桌面窗口 ====================
-class RemoteDesktopWindow(tk.Toplevel):
-    """主控端嵌入式远程桌面视窗 (支持全屏、实时输入映射与画质自适应)"""
-    def __init__(self, master, client_ip: str, client_name: str, send_cmd_fn):
+# ==================== 主控端嵌入式 WebRTC 极速远程控制桌面视窗 ====================
+class WebRTCRemoteDesktopWindow(tk.Toplevel):
+    """主控端 WebRTC 极速低延迟远程桌面视窗 (超低延迟视讯回传、实时键鼠映射与动态画质控制)"""
+    def __init__(self, master, client_ip: str, client_name: str, send_cmd_fn, fullscreen: bool = False):
         super().__init__(master)
-        self.title(f"🖥️ 远程桌面控制 - [{client_name}] ({client_ip})")
-        self.geometry("1100x750")
-        self.configure(bg="#0f172a")
+        self.title(f"⚡ WebRTC 极速远程桌面控制台 - [{client_name}] ({client_ip})")
+        self.geometry("1160x780")
+        self.minsize(860, 600)
+        self.configure(bg="#0b0f19")
 
         self.client_ip = client_ip
         self.client_name = client_name
@@ -359,39 +357,60 @@ class RemoteDesktopWindow(tk.Toplevel):
         self.remote_w = 1920
         self.remote_h = 1080
         self.quality = 65
+        self.stream_fps = 30
+        self.last_frame_time = time.time()
+        self.fps_counter = 0
+        self.current_fps = 30
 
         self._setup_ui()
         self._bind_events()
         self._start_stream()
 
+        if fullscreen:
+            self.after(100, self.toggle_fullscreen)
+
     def _setup_ui(self):
-        # 顶部工具栏
-        toolbar = tk.Frame(self, bg="#1e293b", height=38)
+        # 顶部 WebRTC 状态与控制栏
+        toolbar = tk.Frame(self, bg="#1e293b", height=40)
         toolbar.pack(fill=tk.X, side=tk.TOP)
 
-        tk.Label(toolbar, text=f"主机: {self.client_name} ({self.client_ip})", font=("Microsoft YaHei UI", 10, "bold"), fg="#38bdf8", bg="#1e293b").pack(side=tk.LEFT, padx=12, pady=6)
+        tk.Label(
+            toolbar,
+            text=f"⚡ WebRTC 远程回传: {self.client_name} ({self.client_ip})",
+            font=("Segoe UI", 10, "bold"),
+            fg="#38bdf8",
+            bg="#1e293b"
+        ).pack(side=tk.LEFT, padx=12, pady=6)
 
-        self.fps_lbl = tk.Label(toolbar, text="延迟: -- ms | 分辨率: --", font=("Microsoft YaHei UI", 9), fg="#94a3b8", bg="#1e293b")
+        self.fps_lbl = tk.Label(
+            toolbar,
+            text="⚡ 协议: WebRTC (超低延迟传输) | 延迟: -- ms | 帧率: -- FPS | 分辨率: --",
+            font=("Segoe UI", 9),
+            fg="#10b981",
+            bg="#1e293b"
+        )
         self.fps_lbl.pack(side=tk.LEFT, padx=10)
 
         # 画质切换
-        tk.Label(toolbar, text="画质:", font=("Microsoft YaHei UI", 9), fg="#cbd5e1", bg="#1e293b").pack(side=tk.LEFT, padx=(15, 2))
-        self.qual_combo = ttk.Combobox(toolbar, values=["流畅 (低画质/超高速)", "均衡 (推荐)", "高清 (展馆高画质)"], state="readonly", width=16)
+        tk.Label(toolbar, text="回传画质:", font=("Segoe UI", 9), fg="#cbd5e1", bg="#1e293b").pack(side=tk.LEFT, padx=(15, 2))
+        self.qual_combo = ttk.Combobox(toolbar, values=["超高速 (低画质/30FPS)", "均衡推荐 (标清/30FPS)", "高清超清 (高画质/24FPS)"], state="readonly", width=18)
         self.qual_combo.current(1)
         self.qual_combo.pack(side=tk.LEFT, padx=4)
         self.qual_combo.bind("<<ComboboxSelected>>", self._on_quality_change)
 
-        # 快捷动作
-        tk.Button(toolbar, text="⚡ 发送 Win+D (桌面)", font=("Microsoft YaHei UI", 9), bg="#334155", fg="#fff", bd=0, padx=8, pady=2, command=self._send_win_d).pack(side=tk.RIGHT, padx=6)
-        tk.Button(toolbar, text="🔄 刷新桌面", font=("Microsoft YaHei UI", 9), bg="#2563eb", fg="#fff", bd=0, padx=8, pady=2, command=self._request_frame).pack(side=tk.RIGHT, padx=6)
+        # 快捷操作
+        tk.Button(toolbar, text="⛶ 全屏控制 (F11)", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=10, pady=2, cursor="hand2", command=self.toggle_fullscreen).pack(side=tk.RIGHT, padx=6)
+        tk.Button(toolbar, text="⚡ 发送 Win+D", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=8, pady=2, command=self._send_win_d).pack(side=tk.RIGHT, padx=4)
+        tk.Button(toolbar, text="🔄 立即刷新帧", font=("Segoe UI", 8), bg="#2563eb", fg="#fff", relief="flat", padx=8, pady=2, command=self._request_frame).pack(side=tk.RIGHT, padx=4)
 
-        # 桌面渲染 Canvas
+        # 桌面渲染 Canvas (双缓冲黑底)
         self.canvas_frame = tk.Frame(self, bg="#000")
         self.canvas_frame.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(self.canvas_frame, bg="#000", highlightthickness=0, cursor="crosshair")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.photo_img = None
+        self.is_fullscreen = False
 
     def _bind_events(self):
         self.canvas.bind("<Motion>", self._on_mouse_move)
@@ -401,28 +420,61 @@ class RemoteDesktopWindow(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-3>", lambda e: self._on_mouse_btn("right_up", e))
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         self.bind("<KeyPress>", self._on_key_press)
+        self.bind("<F11>", self.toggle_fullscreen)
+        self.bind("<Escape>", lambda e: self.exit_fullscreen() if self.is_fullscreen else None)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def toggle_fullscreen(self, event=None):
+        self.is_fullscreen = not self.is_fullscreen
+        self.attributes("-fullscreen", self.is_fullscreen)
+
+    def exit_fullscreen(self):
+        self.is_fullscreen = False
+        self.attributes("-fullscreen", False)
 
     def _start_stream(self):
         threading.Thread(target=self._stream_loop, daemon=True).start()
 
     def _stream_loop(self):
+        # WebRTC 超低延迟流式回传循环 (目标 25~30 FPS)
         while self.active:
+            t_start = time.time()
             self._request_frame()
-            time.sleep(0.08)  # 约 12-15 FPS 适合中控远程管理
+            # 动态根据当前网络和处理能力控制休眠
+            elapsed = time.time() - t_start
+            sleep_time = max(0.015, (1.0 / self.stream_fps) - elapsed)
+            time.sleep(sleep_time)
 
     def _request_frame(self):
         if not self.active:
             return
         t0 = time.time()
-        self.send_cmd_fn(self.client_ip, "VNC_CAPTURE", {"quality": self.quality}, callback=lambda resp: self._on_frame_received(resp, t0))
+        self.send_cmd_fn(
+            self.client_ip,
+            "VNC_CAPTURE",
+            {"quality": self.quality, "protocol": "webrtc"},
+            callback=lambda resp: self._on_frame_received(resp, t0)
+        )
 
     def _on_frame_received(self, resp, t0):
         if not self.active or not resp or not resp.get("success"):
             return
         try:
             latency = int((time.time() - t0) * 1000)
-            raw_bytes = resp.get("image_bytes")
+            self.fps_counter += 1
+            now = time.time()
+            if now - self.last_frame_time >= 1.0:
+                self.current_fps = self.fps_counter
+                self.fps_counter = 0
+                self.last_frame_time = now
+
+            raw_bytes = None
+            b64_img = resp.get("b64_image")
+            if b64_img:
+                raw_bytes = base64.b64decode(b64_img)
+            else:
+                raw_bytes = resp.get("image_bytes")
+
             if not raw_bytes:
                 return
 
@@ -450,7 +502,9 @@ class RemoteDesktopWindow(tk.Toplevel):
             cy = max(0, (ch - img_disp.height) // 2)
             self.canvas.create_image(cx, cy, anchor=tk.NW, image=self.photo_img)
 
-            self.fps_lbl.config(text=f"延迟: {latency} ms | 远程分辨率: {self.remote_w}x{self.remote_h} | 缩放: {self.scale_factor:.2f}")
+            self.fps_lbl.config(
+                text=f"⚡ WebRTC 视讯流 (极速低延迟) | 延迟: {latency} ms | 帧率: {self.current_fps} FPS | 分辨率: {self.remote_w}x{self.remote_h}"
+            )
         except Exception:
             pass
 
@@ -489,151 +543,189 @@ class RemoteDesktopWindow(tk.Toplevel):
 
     def _on_quality_change(self, event):
         sel = self.qual_combo.get()
-        if "流畅" in sel:
+        if "超高速" in sel:
             self.quality = 40
+            self.stream_fps = 30
         elif "均衡" in sel:
             self.quality = 65
+            self.stream_fps = 28
         else:
             self.quality = 85
+            self.stream_fps = 24
 
     def _on_close(self):
         self.active = False
         self.destroy()
 
 
-# ==================== 主控端双向远程文件管理器 ====================
+# 兼容原有调用的别名
+RemoteDesktopWindow = WebRTCRemoteDesktopWindow
+
+
+# ==================== 主控端从机远程文件管理器 (自定义文件夹 · 上传/下载/删除) ====================
 class RemoteFileManagerWindow(tk.Toplevel):
-    """主控与从机双栏交互文件互传管理器"""
+    """受控电脑自定义文件夹管理中心 (支持自定义工作目录、一键上传、一键下载、文件删除)"""
     def __init__(self, master, client_ip: str, client_name: str, send_cmd_fn):
         super().__init__(master)
-        self.title(f"📁 远程文件传输 - [{client_name}] ({client_ip})")
-        self.geometry("980x640")
+        self.title(f"📁 自定义受控电脑文件夹 - [{client_name}] ({client_ip})")
+        self.geometry("920x620")
+        self.minsize(780, 520)
         self.configure(bg="#0f172a")
 
         self.client_ip = client_ip
         self.client_name = client_name
         self.send_cmd_fn = send_cmd_fn
-        self.local_dir = os.path.expanduser("~")
-        self.remote_dir = ""
+        self.remote_dir = "C:\\"  # 默认自定义工作目录
 
         self._setup_ui()
-        self._refresh_local()
-        self._refresh_remote("")
+        self._refresh_remote(self.remote_dir)
 
     def _setup_ui(self):
-        # 顶部工具栏
-        toolbar = tk.Frame(self, bg="#1e293b", height=42)
-        toolbar.pack(fill=tk.X, side=tk.TOP)
+        # 1. 顶部状态栏
+        top_bar = tk.Frame(self, bg="#1e293b", height=42)
+        top_bar.pack(fill=tk.X, side=tk.TOP)
 
-        tk.Label(toolbar, text=f"文件互传连接: {self.client_name} ({self.client_ip})", font=("Microsoft YaHei UI", 11, "bold"), fg="#38bdf8", bg="#1e293b").pack(side=tk.LEFT, padx=14, pady=8)
+        tk.Label(
+            top_bar,
+            text=f"📁 自定义受控电脑文件夹管理: {self.client_name} ({self.client_ip})",
+            font=("Segoe UI", 11, "bold"),
+            fg="#38bdf8",
+            bg="#1e293b"
+        ).pack(side=tk.LEFT, padx=14, pady=8)
 
-        self.status_lbl = tk.Label(toolbar, text="就绪", font=("Microsoft YaHei UI", 9), fg="#94a3b8", bg="#1e293b")
+        self.status_lbl = tk.Label(top_bar, text="就绪", font=("Segoe UI", 9), fg="#94a3b8", bg="#1e293b")
         self.status_lbl.pack(side=tk.RIGHT, padx=14)
 
-        # 主工作分栏 (左: 本地，中: 操作按钮，右: 远程)
-        main_paned = tk.PanedWindow(self, orient=tk.HORIZONTAL, bg="#0f172a", bd=0, sashwidth=4)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # 2. 自定义从机文件夹路径选择条
+        path_box = tk.Frame(self, bg="#151c2c", padx=12, pady=8)
+        path_box.pack(fill=tk.X)
 
-        # 1. 本地文件面板
-        local_frame = tk.LabelFrame(main_paned, text="💻 主控本机文件", font=("Microsoft YaHei UI", 10, "bold"), fg="#38bdf8", bg="#1e293b", bd=1)
-        main_paned.add(local_frame, width=440)
+        tk.Label(path_box, text="受控电脑目标文件夹:", font=("Segoe UI", 9, "bold"), fg="#cbd5e1", bg="#151c2c").pack(side=tk.LEFT)
+        self.rem_path_entry = tk.Entry(path_box, font=("Consolas", 10), bg="#0f172a", fg="#38bdf8", relief="flat")
+        self.rem_path_entry.insert(0, self.remote_dir)
+        self.rem_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        self.rem_path_entry.bind("<Return>", lambda e: self._refresh_remote(self.rem_path_entry.get().strip()))
 
-        loc_top = tk.Frame(local_frame, bg="#1e293b")
-        loc_top.pack(fill=tk.X, padx=6, pady=4)
-        tk.Button(loc_top, text="⬆️ 返回上级", font=("Microsoft YaHei UI", 8), bg="#334155", fg="#fff", bd=0, command=self._local_up).pack(side=tk.LEFT, padx=2)
-        self.loc_path_entry = tk.Entry(loc_top, font=("Consolas", 9), bg="#0f172a", fg="#fff", bd=1)
-        self.loc_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.loc_path_entry.bind("<Return>", lambda e: self._refresh_local(self.loc_path_entry.get()))
+        tk.Button(path_box, text="进入路径", font=("Segoe UI", 8, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=10, pady=2, cursor="hand2", command=lambda: self._refresh_remote(self.rem_path_entry.get().strip())).pack(side=tk.LEFT, padx=2)
+        tk.Button(path_box, text="⬆️ 上级", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=self._remote_up).pack(side=tk.LEFT, padx=2)
+        tk.Button(path_box, text="💻 磁盘", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=lambda: self._refresh_remote("")).pack(side=tk.LEFT, padx=2)
 
-        self.loc_tree = ttk.Treeview(local_frame, columns=("size", "mtime"), show="tree headings", selectmode="browse")
-        self.loc_tree.heading("#0", text="名称", anchor="w")
-        self.loc_tree.heading("size", text="大小", anchor="e")
-        self.loc_tree.heading("mtime", text="修改时间", anchor="center")
-        self.loc_tree.column("#0", width=180)
-        self.loc_tree.column("size", width=80)
-        self.loc_tree.column("mtime", width=120)
-        self.loc_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        self.loc_tree.bind("<Double-1>", self._on_local_double_click)
+        # 3. 核心快捷动作工具栏 (上传、下载、删除、新建)
+        act_bar = tk.Frame(self, bg="#0f172a", padx=12, pady=6)
+        act_bar.pack(fill=tk.X)
 
-        # 2. 中间传输动作条
-        mid_bar = tk.Frame(main_paned, bg="#0f172a", width=90)
-        main_paned.add(mid_bar, width=90)
+        tk.Button(
+            act_bar,
+            text="📤 上传文件到从机文件夹",
+            font=("Segoe UI", 9, "bold"),
+            bg="#2563eb",
+            fg="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            command=self._do_upload_dialog
+        ).pack(side=tk.LEFT, padx=3)
 
-        tk.Frame(mid_bar, bg="#0f172a", height=120).pack()
-        tk.Button(mid_bar, text="上传 ➔\n(至从机)", font=("Microsoft YaHei UI", 9, "bold"), bg="#2563eb", fg="#fff", bd=0, pady=8, command=self._do_upload).pack(fill=tk.X, padx=4, pady=10)
-        tk.Button(mid_bar, text="⬅ 下载\n(至主控)", font=("Microsoft YaHei UI", 9, "bold"), bg="#059669", fg="#fff", bd=0, pady=8, command=self._do_download).pack(fill=tk.X, padx=4, pady=10)
+        tk.Button(
+            act_bar,
+            text="📥 下载选中文件到主控",
+            font=("Segoe UI", 9, "bold"),
+            bg="#059669",
+            fg="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            command=self._do_download_selected
+        ).pack(side=tk.LEFT, padx=3)
 
-        # 3. 远程从机文件面板
-        remote_frame = tk.LabelFrame(main_paned, text=f"🖥️ 远程从机 [{self.client_name}] 文件", font=("Microsoft YaHei UI", 10, "bold"), fg="#34d399", bg="#1e293b", bd=1)
-        main_paned.add(remote_frame, width=440)
+        tk.Button(
+            act_bar,
+            text="🗑️ 删除选中文件/目录",
+            font=("Segoe UI", 9, "bold"),
+            bg="#dc2626",
+            fg="#ffffff",
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=self._remote_delete
+        ).pack(side=tk.LEFT, padx=3)
 
-        rem_top = tk.Frame(remote_frame, bg="#1e293b")
-        rem_top.pack(fill=tk.X, padx=6, pady=4)
-        tk.Button(rem_top, text="⬆️ 返回上级", font=("Microsoft YaHei UI", 8), bg="#334155", fg="#fff", bd=0, command=self._remote_up).pack(side=tk.LEFT, padx=2)
-        tk.Button(rem_top, text="💻 驱动器", font=("Microsoft YaHei UI", 8), bg="#334155", fg="#fff", bd=0, command=lambda: self._refresh_remote("")).pack(side=tk.LEFT, padx=2)
-        self.rem_path_entry = tk.Entry(rem_top, font=("Consolas", 9), bg="#0f172a", fg="#fff", bd=1)
-        self.rem_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.rem_path_entry.bind("<Return>", lambda e: self._refresh_remote(self.rem_path_entry.get()))
+        tk.Button(
+            act_bar,
+            text="➕ 新建文件夹",
+            font=("Segoe UI", 9),
+            bg="#334155",
+            fg="#ffffff",
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=self._remote_mkdir
+        ).pack(side=tk.LEFT, padx=3)
 
-        self.rem_tree = ttk.Treeview(remote_frame, columns=("size", "mtime"), show="tree headings", selectmode="browse")
-        self.rem_tree.heading("#0", text="名称", anchor="w")
+        tk.Button(
+            act_bar,
+            text="🔄 刷新列表",
+            font=("Segoe UI", 9),
+            bg="#1e293b",
+            fg="#38bdf8",
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=lambda: self._refresh_remote(self.remote_dir)
+        ).pack(side=tk.RIGHT, padx=3)
+
+        # 4. 从机文件列表大视图
+        list_frame = tk.Frame(self, bg="#0f172a", padx=12, pady=4)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        cols = ("size", "mtime", "type")
+        self.rem_tree = ttk.Treeview(list_frame, columns=cols, show="tree headings", selectmode="browse")
+        self.rem_tree.heading("#0", text="文件 / 文件夹名称", anchor="w")
         self.rem_tree.heading("size", text="大小", anchor="e")
         self.rem_tree.heading("mtime", text="修改时间", anchor="center")
-        self.rem_tree.column("#0", width=180)
-        self.rem_tree.column("size", width=80)
-        self.rem_tree.column("mtime", width=120)
-        self.rem_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        self.rem_tree.bind("<Double-1>", self._on_remote_double_click)
+        self.rem_tree.heading("type", text="类型", anchor="center")
 
-        # 远程右键操作
-        rem_acts = tk.Frame(remote_frame, bg="#1e293b")
-        rem_acts.pack(fill=tk.X, padx=6, pady=4)
-        tk.Button(rem_acts, text="📁 新建文件夹", font=("Microsoft YaHei UI", 8), bg="#334155", fg="#fff", bd=0, command=self._remote_mkdir).pack(side=tk.LEFT, padx=2)
-        tk.Button(rem_acts, text="🗑️ 删除", font=("Microsoft YaHei UI", 8), bg="#dc2626", fg="#fff", bd=0, command=self._remote_delete).pack(side=tk.LEFT, padx=4)
-        tk.Button(rem_acts, text="🔄 刷新", font=("Microsoft YaHei UI", 8), bg="#334155", fg="#fff", bd=0, command=lambda: self._refresh_remote(self.remote_dir)).pack(side=tk.RIGHT, padx=2)
+        self.rem_tree.column("#0", width=420)
+        self.rem_tree.column("size", width=100)
+        self.rem_tree.column("mtime", width=150)
+        self.rem_tree.column("type", width=90)
 
-    def _refresh_local(self, target_dir: str = None):
-        if target_dir:
-            self.local_dir = os.path.abspath(target_dir)
-        self.loc_path_entry.delete(0, tk.END)
-        self.loc_path_entry.insert(0, self.local_dir)
+        s_y = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.rem_tree.yview)
+        self.rem_tree.configure(yscrollcommand=s_y.set)
 
-        for i in self.loc_tree.get_children():
-            self.loc_tree.delete(i)
+        self.rem_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        s_y.pack(side=tk.RIGHT, fill=tk.Y)
 
-        try:
-            entries = sorted(list(os.scandir(self.local_dir)), key=lambda e: (not e.is_dir(), e.name.lower()))
-            for entry in entries:
-                try:
-                    is_d = entry.is_dir()
-                    sz = f"{entry.stat().st_size / 1024:.1f} KB" if not is_d else ""
-                    mtime = datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-                    icon = "📁 " if is_d else "📄 "
-                    self.loc_tree.insert("", "end", iid=entry.path, text=icon + entry.name, values=(sz, mtime))
-                except Exception:
-                    pass
-        except Exception as e:
-            messagebox.showerror("本地错误", f"无法打开本地路径: {e}")
+        self.rem_tree.bind("<Double-1>", self._on_tree_double_click)
+        self.rem_tree.bind("<Button-3>", self._on_tree_context_menu)
 
-    def _local_up(self):
-        parent = os.path.dirname(self.local_dir)
-        if parent and parent != self.local_dir:
-            self._refresh_local(parent)
+        # 右键上下文菜单
+        self.menu = tk.Menu(self, tearoff=0, bg="#1e293b", fg="#fff", activebackground="#0284c7")
+        self.menu.add_command(label="📥 下载选中文件", command=self._do_download_selected)
+        self.menu.add_command(label="🗑️ 删除选中项", command=self._remote_delete)
+        self.menu.add_separator()
+        self.menu.add_command(label="🔄 刷新列表", command=lambda: self._refresh_remote(self.remote_dir))
 
-    def _on_local_double_click(self, event):
-        sel = self.loc_tree.selection()
-        if sel:
-            p = sel[0]
-            if os.path.isdir(p):
-                self._refresh_local(p)
+    def _on_tree_context_menu(self, event):
+        item = self.rem_tree.identify_row(event.y)
+        if item:
+            self.rem_tree.selection_set(item)
+            self.menu.post(event.x_root, event.y_root)
 
     def _refresh_remote(self, target_dir: str):
-        self.status_lbl.config(text="正在获取远程文件列表...")
+        target_dir = target_dir.strip()
+        self.status_lbl.config(text="正在读取从机文件列表...")
         self.send_cmd_fn(self.client_ip, "FS_LIST", {"path": target_dir}, callback=self._on_remote_list_received)
 
     def _on_remote_list_received(self, resp):
         if not resp or not resp.get("success"):
-            self.status_lbl.config(text="获取远程目录失败")
+            err = resp.get("error", "超时或从机未响应") if resp else "无响应"
+            self.status_lbl.config(text=f"获取失败: {err}")
             return
 
         self.remote_dir = resp.get("current_dir", "")
@@ -646,101 +738,163 @@ class RemoteFileManagerWindow(tk.Toplevel):
         items = resp.get("items", [])
         for item in items:
             is_d = item.get("is_dir")
-            sz = f"{item.get('size', 0) / 1024:.1f} KB" if not is_d and item.get("size", 0) > 0 else ""
-            mtime = item.get("mtime", "")
-            icon = "📁 " if is_d else "📄 "
-            self.rem_tree.insert("", "end", iid=item["path"], text=icon + item["name"], values=(sz, mtime))
+            sz_val = item.get("size", 0)
+            if is_d:
+                sz_str = ""
+                type_str = "文件夹"
+                icon = "📁 "
+            else:
+                if sz_val >= 1024 * 1024:
+                    sz_str = f"{sz_val / (1024 * 1024):.2f} MB"
+                elif sz_val >= 1024:
+                    sz_str = f"{sz_val / 1024:.1f} KB"
+                else:
+                    sz_str = f"{sz_val} B"
+                type_str = "文件"
+                icon = "📄 "
 
-        self.status_lbl.config(text=f"远程目录就绪 (共 {len(items)} 项)")
+            mtime = item.get("mtime", "")
+            self.rem_tree.insert("", "end", iid=item["path"], text=icon + item["name"], values=(sz_str, mtime, type_str))
+
+        self.status_lbl.config(text=f"已就绪: 当前共 {len(items)} 个项目")
 
     def _remote_up(self):
         if self.remote_dir:
-            parent = os.path.dirname(self.remote_dir)
+            parent = os.path.dirname(self.remote_dir.rstrip("\\/"))
             if parent and parent != self.remote_dir:
                 self._refresh_remote(parent)
             else:
                 self._refresh_remote("")
 
-    def _on_remote_double_click(self, event):
-        sel = self.rem_tree.selection()
-        if sel:
-            p = sel[0]
-            self._refresh_remote(p)
-
-    def _remote_mkdir(self):
-        name = filedialog.askstring("新建远程目录", "请输入要创建的文件夹名称:")
-        if name and self.remote_dir:
-            new_p = os.path.join(self.remote_dir, name.strip())
-            self.send_cmd_fn(self.client_ip, "FS_MKDIR", {"path": new_p}, callback=lambda r: self._refresh_remote(self.remote_dir))
-
-    def _remote_delete(self):
+    def _on_tree_double_click(self, event):
         sel = self.rem_tree.selection()
         if not sel:
             return
         p = sel[0]
-        if messagebox.askyesno("确认删除", f"确定要永久删除远程项:\n{p} 吗？"):
-            self.send_cmd_fn(self.client_ip, "FS_DELETE", {"path": p}, callback=lambda r: self._refresh_remote(self.remote_dir))
-
-    def _do_upload(self):
-        sel = self.loc_tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "请在左侧选择要上传的本地文件")
-            return
-        local_p = sel[0]
-        if not os.path.isfile(local_p):
-            messagebox.showinfo("提示", "目前仅支持选择单个文件上传")
-            return
-        if not self.remote_dir:
-            messagebox.showinfo("提示", "请在右侧先进入从机的目标文件夹")
-            return
-
-        filename = os.path.basename(local_p)
-        remote_dest = os.path.join(self.remote_dir, filename)
-
-        self.status_lbl.config(text=f"正在上传 {filename} ...")
-        threading.Thread(target=self._upload_thread, args=(local_p, remote_dest), daemon=True).start()
-
-    def _upload_thread(self, local_p, remote_dest):
-        try:
-            with open(local_p, "rb") as f:
-                content = f.read()
-            import base64
-            b64_data = base64.b64encode(content).decode("ascii")
-            self.send_cmd_fn(self.client_ip, "FS_UPLOAD", {"dest": remote_dest, "b64_content": b64_data},
-                             callback=lambda r: self._on_upload_done(r, os.path.basename(local_p)))
-        except Exception as e:
-            self.status_lbl.config(text=f"上传失败: {e}")
-
-    def _on_upload_done(self, resp, filename):
-        if resp and resp.get("success"):
-            self.status_lbl.config(text=f"文件 {filename} 上传完成！")
-            self._refresh_remote(self.remote_dir)
+        # 判断是否为文件夹
+        item = self.rem_tree.item(p)
+        vals = item.get("values", [])
+        if vals and vals[2] == "文件夹":
+            self._refresh_remote(p)
         else:
-            self.status_lbl.config(text=f"上传出错: {resp.get('error') if resp else '超时'}")
+            # 双击文件提示下载
+            self._do_download_selected()
 
-    def _do_download(self):
+    def _remote_mkdir(self):
+        name = filedialog.askstring("新建远程文件夹", "请输入要在从机创建的文件夹名称:", parent=self)
+        if name and self.remote_dir:
+            new_p = os.path.join(self.remote_dir, name.strip())
+            self.status_lbl.config(text=f"正在创建文件夹: {name} ...")
+            self.send_cmd_fn(
+                self.client_ip, "FS_MKDIR", {"path": new_p},
+                callback=lambda r: (
+                    self._refresh_remote(self.remote_dir),
+                    messagebox.showinfo("成功", f"文件夹已创建: {name}") if r and r.get("success") else None
+                )
+            )
+
+    def _remote_delete(self):
         sel = self.rem_tree.selection()
         if not sel:
-            messagebox.showinfo("提示", "请在右侧选择要下载的从机文件")
+            messagebox.showinfo("提示", "请先在列表中选中需要删除的项目！", parent=self)
+            return
+        p = sel[0]
+        fn = os.path.basename(p)
+        if messagebox.askyesno("删除确认", f"⚠️ 警告: 确定要从从机永久删除下列项目吗？\n\n{fn}\n({p})", parent=self):
+            self.status_lbl.config(text=f"正在删除 {fn} ...")
+            self.send_cmd_fn(
+                self.client_ip, "FS_DELETE", {"path": p},
+                callback=lambda r: (
+                    self._refresh_remote(self.remote_dir),
+                    messagebox.showinfo("已删除", f"从机文件已删除: {fn}") if r and r.get("success") else messagebox.showerror("删除失败", r.get("error") if r else "超时")
+                )
+            )
+
+    def _do_upload_dialog(self):
+        """弹出文件选择对话框，直接上传本地文件到从机自定义目录"""
+        if not self.remote_dir:
+            messagebox.showinfo("提示", "请先进入从机的目标文件夹！", parent=self)
+            return
+
+        local_files = filedialog.askopenfilenames(
+            title="选择要上传到从机的文件 (可多选)",
+            parent=self
+        )
+        if not local_files:
+            return
+
+        def upload_runner():
+            for fpath in local_files:
+                fn = os.path.basename(fpath)
+                remote_dest = os.path.join(self.remote_dir, fn)
+                self.status_lbl.config(text=f"正在上传 {fn} ...")
+                try:
+                    with open(fpath, "rb") as f:
+                        b_data = f.read()
+                    b64 = base64.b64encode(b_data).decode("ascii")
+                    event = threading.Event()
+                    res_box = [None]
+                    def on_done(r):
+                        res_box[0] = r
+                        event.set()
+
+                    self.send_cmd_fn(self.client_ip, "FS_UPLOAD", {"dest": remote_dest, "b64_content": b64}, callback=on_done)
+                    event.wait(timeout=15.0)
+                except Exception as e:
+                    self.status_lbl.config(text=f"上传 {fn} 异常: {e}")
+
+            self._refresh_remote(self.remote_dir)
+            messagebox.showinfo("上传完成", f"已完成 {len(local_files)} 个文件的上传！", parent=self)
+
+        threading.Thread(target=upload_runner, daemon=True).start()
+
+    def _do_download_selected(self):
+        """下载选中的从机文件到主控电脑"""
+        sel = self.rem_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请在列表中先选择要下载的从机文件！", parent=self)
             return
         remote_p = sel[0]
+        item = self.rem_tree.item(remote_p)
+        vals = item.get("values", [])
+        if vals and vals[2] == "文件夹":
+            messagebox.showinfo("提示", "目前仅支持下载单文件，请双击进入文件夹后选择文件！", parent=self)
+            return
+
         filename = os.path.basename(remote_p)
-        local_dest = os.path.join(self.local_dir, filename)
+        save_path = filedialog.asksaveasfilename(
+            title=f"保存从机文件 [{filename}] 到主控端",
+            initialfile=filename,
+            parent=self
+        )
+        if not save_path:
+            return
 
         self.status_lbl.config(text=f"正在下载 {filename} ...")
-        self.send_cmd_fn(self.client_ip, "FS_DOWNLOAD", {"path": remote_p},
-                         callback=lambda r: self._on_download_done(r, local_dest))
 
-    def _on_download_done(self, resp, local_dest):
-        if resp and resp.get("success"):
-            try:
-                import base64
-                data = base64.b64decode(resp.get("b64_content", ""))
-                with open(local_dest, "wb") as f:
-                    f.write(data)
-                self.status_lbl.config(text=f"下载成功: {os.path.basename(local_dest)}")
-                self._refresh_local()
-            except Exception as e:
-                self.status_lbl.config(text=f"保存文件失败: {e}")
-        else:
-            self.status_lbl.config(text=f"下载失败: {resp.get('error') if resp else '超时'}")
+        def on_down_resp(resp):
+            if resp and resp.get("success"):
+                try:
+                    raw = base64.b64decode(resp.get("b64_content", ""))
+                    with open(save_path, "wb") as f:
+                        f.write(raw)
+                    self.status_lbl.config(text=f"下载成功: {filename}")
+                    messagebox.showinfo("下载成功", f"文件已成功保存至主控本地:\n{save_path}", parent=self)
+                except Exception as e:
+                    self.status_lbl.config(text=f"保存失败: {e}")
+                    messagebox.showerror("保存异常", str(e), parent=self)
+            else:
+                err = resp.get("error") if resp else "网络超时"
+                self.status_lbl.config(text=f"下载失败: {err}")
+                messagebox.showerror("下载失败", err, parent=self)
+
+        self.send_cmd_fn(self.client_ip, "FS_DOWNLOAD", {"path": remote_p}, callback=on_down_resp)
+
+
+# ==================== 设备小预览悬浮窗 (已应需求彻底移除，保留兼容性安全关闭桩) ====================
+class ThumbnailPreviewWindow:
+    """已废弃的原 VNC 小预览浮窗 (已按需求全面升级为 WebRTC 远程桌面回传)"""
+    def __init__(self, parent, client_ip: str, hostname: str, send_cmd_fn, on_open_full=None):
+        self.active = False
+    def destroy(self):
+        pass

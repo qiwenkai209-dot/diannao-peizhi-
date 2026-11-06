@@ -9,6 +9,9 @@ __pycache__/
 *.pyc
 *.enc
 .*_lic.dat
+.*_lic*.dat
+*.dat
+*.log
 __armor_build_*
 __build_cache_*
 

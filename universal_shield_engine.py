@@ -80,8 +80,23 @@ import hashlib
 import hmac
 import uuid
 import ctypes
+import ctypes.wintypes
+import winreg
+import ipaddress
+import select
+import socket
+import platform
+import psutil
+import PIL
+from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFilter, ImageFont
+import subprocess
+import shutil
+import tempfile
+import random
+import re
+import datetime
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, messagebox, filedialog, scrolledtext, font, simpledialog
 
 # 软件产品专属元数据
 PRODUCT_ID = "@@PRODUCT_ID@@"
@@ -340,16 +355,8 @@ def show_license_gui(lm):
 
 def bootstrap():
     lm = RuntimeLicenseManager()
-    ok, msg = lm.check()
-    if not ok:
-        activated = show_license_gui(lm)
-        if not activated:
-            sys.exit(0)
-        # 允许进入从机等待主控远程授权或启动主控
-
-    lm.record_run()
-
-    # 授权验证通过：在 RAM 中内存解密业务代码并动态加载启动！
+    # 移交执行给业务端专属授权守卫与前置强提醒机制 (展馆控制终端专属算法)
+    # 在 RAM 中内存解密业务代码并动态加载启动！
     dec_key = EMBED_SALT
     
     # 读取同程序包内嵌或外挂的密文资产
@@ -380,13 +387,15 @@ def bootstrap():
         messagebox.showerror("解密失败", f"受保护代码内存解密异常: {e}")
         sys.exit(1)
 
-    # 在内存虚拟文件系统中解压并动态注入 sys.modules
+    # 在内存虚拟文件系统中解压并动态注册 PEP 451 内存导入器
     import io
     import zipfile
+    from importlib.machinery import ModuleSpec
+
     zf = zipfile.ZipFile(io.BytesIO(raw_zip_data))
-    
-    # 动态加载所有模块字节码到内存
+    BYTECODE_CACHE = {}
     entry_code = None
+
     for item in zf.infolist():
         fname = item.filename
         content = zf.read(fname)
@@ -395,11 +404,24 @@ def bootstrap():
             code_obj = marshal.loads(content)
             if fname == "@@ENTRY_MODULE_NAME@@.pyc_raw":
                 entry_code = code_obj
-            else:
-                mod = types.ModuleType(mod_name)
-                mod.__file__ = os.path.join(base_dir, fname[:-8] + ".py")
-                sys.modules[mod_name] = mod
-                exec(code_obj, mod.__dict__)
+            BYTECODE_CACHE[mod_name] = (code_obj, fname[:-8] + ".py")
+
+    class _ArmorMemoryLoader:
+        def find_spec(self, fullname, path, target=None):
+            if fullname in BYTECODE_CACHE:
+                return ModuleSpec(fullname, self)
+            return None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            code_obj, rel_path = BYTECODE_CACHE[module.__name__]
+            module.__file__ = os.path.join(base_dir, rel_path)
+            exec(code_obj, module.__dict__)
+
+    # 优先注入内存导入器，使得所有业务模块在互相 import 时均能自动按需加载
+    sys.meta_path.insert(0, _ArmorMemoryLoader())
 
     # 移交执行权给主入口
     if entry_code:
@@ -407,7 +429,13 @@ def bootstrap():
         main_mod.__file__ = os.path.join(base_dir, "@@ENTRY_FILE_NAME@@")
         main_mod.__dict__["__GWC_LICENSE_MGR__"] = lm
         sys.modules["__main__"] = main_mod
-        exec(entry_code, main_mod.__dict__)
+        try:
+            exec(entry_code, main_mod.__dict__)
+        except Exception as e:
+            import traceback
+            err_msg = traceback.format_exc()
+            messagebox.showerror("运行异常", f"程序启动发生异常:\n{err_msg}")
+            sys.exit(1)
     else:
         messagebox.showerror("启动异常", "未能找到已加壳的主程序入口！")
         sys.exit(1)
@@ -479,6 +507,9 @@ class UniversalShieldEngine:
                         continue
                     for file in files:
                         if file.endswith(".py"):
+                            # 忽略构建期与开发辅助脚本，防止在运行时执行离线代码
+                            if file in ["generate_gear_icon.py", "protect_build.py", "universal_shield_engine.py"]:
+                                continue
                             file_p = os.path.join(root, file)
                             rel_p = os.path.relpath(file_p, src_root).replace("\\", "/")
                             mod_name = os.path.splitext(rel_p)[0].replace("/", ".")
@@ -549,10 +580,28 @@ class UniversalShieldEngine:
             "--onefile",
             "--name", actual_exe_title,
             "--add-data", f"{payload_filename};.",
+            "--collect-all", "tkinter",
+            "--collect-all", "PIL",
+            "--collect-all", "psutil",
+            "--hidden-import", "tkinter",
+            "--hidden-import", "tkinter.ttk",
+            "--hidden-import", "tkinter.filedialog",
+            "--hidden-import", "tkinter.scrolledtext",
+            "--hidden-import", "tkinter.simpledialog",
+            "--hidden-import", "tkinter.font",
+            "--hidden-import", "ctypes.wintypes",
+            "--hidden-import", "winreg",
+            "--hidden-import", "ipaddress",
+            "--hidden-import", "select",
+            "--hidden-import", "socket",
+            "--hidden-import", "platform",
             "--hidden-import", "PIL",
             "--hidden-import", "PIL.Image",
             "--hidden-import", "PIL.ImageTk",
             "--hidden-import", "PIL.ImageGrab",
+            "--hidden-import", "PIL.ImageDraw",
+            "--hidden-import", "PIL.ImageFilter",
+            "--hidden-import", "PIL.ImageFont",
             "--hidden-import", "psutil",
         ]
 
@@ -575,6 +624,20 @@ class UniversalShieldEngine:
         dist_exe_path = os.path.join(build_temp_dir, "dist", f"{actual_exe_title}.exe")
         if os.path.exists(dist_exe_path):
             final_exe_path = os.path.join(output_dir, f"{actual_exe_title}.exe")
+            # Windows 安全替换机制：先移除已有文件或重命名，避免 Windows 只读写入句柄锁
+            if os.path.exists(final_exe_path):
+                try:
+                    os.remove(final_exe_path)
+                except Exception:
+                    try:
+                        old_tmp = final_exe_path + f".old_{int(time.time())}"
+                        os.rename(final_exe_path, old_tmp)
+                        try:
+                            os.remove(old_tmp)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             shutil.copy2(dist_exe_path, final_exe_path)
             # 清理中间临时缓存
             shutil.rmtree(build_temp_dir, ignore_errors=True)
