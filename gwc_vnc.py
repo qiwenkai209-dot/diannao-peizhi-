@@ -368,14 +368,14 @@ class StandaloneRfbVncServer:
                 pass
 
 
-# ==================== 主控端嵌入式 WebRTC 极速远程控制桌面视窗 ====================
+# ==================== 主控端嵌入式远程控制桌面视窗 (小屏预览 / 全屏) ====================
 class WebRTCRemoteDesktopWindow(tk.Toplevel):
-    """主控端 WebRTC 极速低延迟远程桌面视窗 (超低延迟视讯回传、实时键鼠映射与动态画质控制)"""
+    """主控端极速低延迟远程桌面视窗 (超低延迟视讯流回传、实时键鼠映射与动态画质自适应)"""
     def __init__(self, master, client_ip: str, client_name: str, send_cmd_fn, fullscreen: bool = False):
         super().__init__(master)
-        self.title(f"⚡ WebRTC 极速远程桌面控制台 - [{client_name}] ({client_ip})")
-        self.geometry("1160x780")
-        self.minsize(860, 600)
+        self.title(f"🖥️ 远程桌面预览 - [{client_name}] ({client_ip})")
+        self.geometry("960x640")
+        self.minsize(640, 480)
         self.configure(bg="#0b0f19")
 
         self.client_ip = client_ip
@@ -393,6 +393,8 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self._canvas_img_id = None
         self._last_mouse_send_time = 0
         self._last_mouse_pos = (-1, -1)
+        self._frame_in_flight = False
+        self._last_flight_time = 0
 
         self._setup_ui()
         self._bind_events()
@@ -402,40 +404,37 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
             self.after(100, self.toggle_fullscreen)
 
     def _setup_ui(self):
-        # 顶部 WebRTC 状态与控制栏
-        toolbar = tk.Frame(self, bg="#1e293b", height=40)
+        # 顶部状态与控制栏 (简洁清爽)
+        toolbar = tk.Frame(self, bg="#1e293b", height=38)
         toolbar.pack(fill=tk.X, side=tk.TOP)
 
         tk.Label(
             toolbar,
-            text=f"⚡ WebRTC 远程桌面: {self.client_name} ({self.client_ip})",
-            font=("Segoe UI", 10, "bold"),
+            text=f"🖥️ 远程桌面: {self.client_name} ({self.client_ip})",
+            font=("Segoe UI", 9, "bold"),
             fg="#38bdf8",
             bg="#1e293b"
-        ).pack(side=tk.LEFT, padx=12, pady=6)
+        ).pack(side=tk.LEFT, padx=10, pady=5)
 
         self.fps_lbl = tk.Label(
             toolbar,
-            text="⚡ 协议: WebRTC (超低延迟视讯传输) | 延迟: -- ms | 帧率: -- FPS | 分辨率: --",
-            font=("Segoe UI", 9),
+            text="延迟: -- ms | 帧率: -- FPS | 分辨率: --",
+            font=("Segoe UI", 8),
             fg="#10b981",
             bg="#1e293b"
         )
-        self.fps_lbl.pack(side=tk.LEFT, padx=10)
+        self.fps_lbl.pack(side=tk.LEFT, padx=8)
 
         # 画质切换
-        tk.Label(toolbar, text="画质:", font=("Segoe UI", 9), fg="#cbd5e1", bg="#1e293b").pack(side=tk.LEFT, padx=(10, 2))
-        self.qual_combo = ttk.Combobox(toolbar, values=["超高速 (低画质/30FPS)", "均衡推荐 (标清/30FPS)", "高清超清 (高画质/24FPS)"], state="readonly", width=18)
+        tk.Label(toolbar, text="画质:", font=("Segoe UI", 8), fg="#cbd5e1", bg="#1e293b").pack(side=tk.LEFT, padx=(8, 2))
+        self.qual_combo = ttk.Combobox(toolbar, values=["超高速 (低画质/30FPS)", "均衡推荐 (标清/30FPS)", "高清超清 (高画质/24FPS)"], state="readonly", width=17)
         self.qual_combo.current(1)
-        self.qual_combo.pack(side=tk.LEFT, padx=4)
+        self.qual_combo.pack(side=tk.LEFT, padx=2)
         self.qual_combo.bind("<<ComboboxSelected>>", self._on_quality_change)
 
-        # 快捷反控操作按键 (面向展馆运维高频指令)
-        tk.Button(toolbar, text="⛶ 全屏 (F11)", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=self.toggle_fullscreen).pack(side=tk.RIGHT, padx=4)
-        tk.Button(toolbar, text="📊 任务管理器", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._send_task_mgr).pack(side=tk.RIGHT, padx=2)
-        tk.Button(toolbar, text="🔄 Alt+Tab", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._send_alt_tab).pack(side=tk.RIGHT, padx=2)
-        tk.Button(toolbar, text="⚡ Win+D", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._send_win_d).pack(side=tk.RIGHT, padx=2)
-        tk.Button(toolbar, text="🔄 刷新帧", font=("Segoe UI", 8), bg="#2563eb", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._request_frame).pack(side=tk.RIGHT, padx=2)
+        # 简洁右侧操作按键: 仅保留全屏与刷新
+        tk.Button(toolbar, text="⛶ 全屏 (F11)", font=("Segoe UI", 8, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=self.toggle_fullscreen).pack(side=tk.RIGHT, padx=4)
+        tk.Button(toolbar, text="🔄 刷新", font=("Segoe UI", 8), bg="#2563eb", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._force_request_frame).pack(side=tk.RIGHT, padx=2)
 
         # 桌面渲染 Canvas (双缓冲黑底，点击自动获取键盘焦点)
         self.canvas_frame = tk.Frame(self, bg="#000")
@@ -459,7 +458,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-3>", lambda e: self._on_mouse_btn("right_up", e))
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
 
-        # 键盘按键与释放完整捕获，杜绝粘键
+        # 键盘按键捕获
         self.bind("<KeyPress>", self._on_key_press)
         self.bind("<KeyRelease>", self._on_key_release)
         self.canvas.bind("<Button-1>", lambda e: (self.canvas.focus_set(), self._on_mouse_btn("left_down", e)))
@@ -480,25 +479,38 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         threading.Thread(target=self._stream_loop, daemon=True).start()
 
     def _stream_loop(self):
+        """流控循环: 基于 In-Flight 闭环控制，自适应网络延迟，杜绝帧队列积压与频闪"""
         while self.active:
-            t_start = time.time()
+            now = time.time()
+            if self._frame_in_flight:
+                if now - self._last_flight_time > 0.8:
+                    self._frame_in_flight = False
+                else:
+                    time.sleep(0.01)
+                    continue
+
             self._request_frame()
-            elapsed = time.time() - t_start
-            sleep_time = max(0.015, (1.0 / self.stream_fps) - elapsed)
-            time.sleep(sleep_time)
+            time.sleep(max(0.015, 1.0 / self.stream_fps))
+
+    def _force_request_frame(self):
+        self._frame_in_flight = False
+        self._request_frame()
 
     def _request_frame(self):
-        if not self.active:
+        if not self.active or self._frame_in_flight:
             return
-        t0 = time.time()
+        self._frame_in_flight = True
+        self._last_flight_time = time.time()
+        t0 = self._last_flight_time
         self.send_cmd_fn(
             self.client_ip,
             "VNC_CAPTURE",
-            {"quality": self.quality, "protocol": "webrtc"},
+            {"quality": self.quality, "protocol": "stream"},
             callback=lambda resp: self._on_frame_received(resp, t0)
         )
 
     def _on_frame_received(self, resp, t0):
+        self._frame_in_flight = False
         if not self.active or not resp or not resp.get("success"):
             return
         try:
@@ -543,7 +555,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
             cx = max(0, (cw - img_disp.width) // 2)
             cy = max(0, (ch - img_disp.height) // 2)
 
-            # 增量刷新图元，彻底终结 delete("all") 导致的每秒 30 次剧烈白闪/黑闪！
+            # 增量刷新图元，杜绝 delete("all") 导致的闪烁
             if not self._canvas_img_id:
                 self.canvas.delete("all")
                 self._canvas_img_id = self.canvas.create_image(cx, cy, anchor=tk.NW, image=self.photo_img)
@@ -552,7 +564,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
                 self.canvas.coords(self._canvas_img_id, cx, cy)
 
             self.fps_lbl.config(
-                text=f"⚡ WebRTC 视讯流 (极速低延迟) | 延迟: {latency} ms | 帧率: {self.current_fps} FPS | 分辨率: {self.remote_w}x{self.remote_h}"
+                text=f"延迟: {latency} ms | 帧率: {self.current_fps} FPS | 分辨率: {self.remote_w}x{self.remote_h}"
             )
         except Exception:
             pass
@@ -601,15 +613,6 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         vk = event.keycode
         self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "key_release", "vk": vk})
 
-    def _send_win_d(self):
-        self.send_cmd_fn(self.client_ip, "RUN_APP", {"path": "powershell", "args": "-Command (New-Object -ComObject Shell.Application).ToggleDesktop()"})
-
-    def _send_task_mgr(self):
-        self.send_cmd_fn(self.client_ip, "RUN_APP", {"path": "taskmgr.exe"})
-
-    def _send_alt_tab(self):
-        self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "alt_tab"})
-
     def _on_quality_change(self, event):
         sel = self.qual_combo.get()
         if "超高速" in sel:
@@ -624,6 +627,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
 
     def _on_close(self):
         self.active = False
+        self._frame_in_flight = False
         self.destroy()
 
 

@@ -98,6 +98,18 @@ def collect_system_snapshot(custom_paths: list = None) -> dict:
     return snapshot
 
 
+def format_file_size(size_bytes: int) -> str:
+    """智能人性化文件大小格式化 (杜绝不足 1MB 显示为 0Mb 的误导)"""
+    if size_bytes <= 0:
+        return "0 B"
+    elif size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
 def create_backup_package(name: str = "", notes: str = "", custom_paths: list = None, output_dir: str = None) -> dict:
     """
     执行一键系统配置备份并打包为 .gwcbackup 文件
@@ -147,14 +159,21 @@ def create_backup_package(name: str = "", notes: str = "", custom_paths: list = 
                             arc_name = os.path.join("files", base_folder, rel_p)
                             zf.write(full_p, arc_name)
 
-        sz_mb = round(os.path.getsize(file_path) / (1024 * 1024), 2)
+        size_bytes = os.path.getsize(file_path)
+        if size_bytes == 0:
+            raise IOError("备份文件写入异常，生成文件大小为 0 字节")
+
+        sz_str = format_file_size(size_bytes)
+        sz_mb = max(0.01, round(size_bytes / (1024 * 1024), 2))
         return {
             "success": True,
             "path": file_path,
             "filename": filename,
             "manifest": manifest,
+            "size_bytes": size_bytes,
+            "size_str": sz_str,
             "size_mb": sz_mb,
-            "msg": f"系统配置已成功备份为 {filename} ({sz_mb} MB)"
+            "msg": f"系统配置已成功备份为 {filename} ({sz_str})"
         }
     except Exception as e:
         return {"success": False, "error": f"备份生成失败: {e}"}
@@ -166,6 +185,10 @@ def inspect_backup_package(file_path: str) -> dict:
         return {"valid": False, "error": "备份文件不存在"}
 
     try:
+        size_bytes = os.path.getsize(file_path)
+        if size_bytes == 0:
+            return {"valid": False, "error": "备份文件大小为 0 字节 (损坏的空文件)"}
+
         with zipfile.ZipFile(file_path, "r") as zf:
             names = zf.namelist()
             if "manifest.json" not in names:
@@ -176,6 +199,8 @@ def inspect_backup_package(file_path: str) -> dict:
             sw_data = json.loads(zf.read("software.json").decode("utf-8")) if "software.json" in names else []
             pol_data = json.loads(zf.read("policies.json").decode("utf-8")) if "policies.json" in names else {}
 
+            sz_str = format_file_size(size_bytes)
+            sz_mb = max(0.01, round(size_bytes / (1024 * 1024), 2))
             return {
                 "valid": True,
                 "manifest": manifest,
@@ -184,7 +209,9 @@ def inspect_backup_package(file_path: str) -> dict:
                 "policies_count": len(pol_data),
                 "has_files": any(n.startswith("files/") for n in names),
                 "path": file_path,
-                "size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2)
+                "size_bytes": size_bytes,
+                "size_str": sz_str,
+                "size_mb": sz_mb
             }
     except Exception as e:
         return {"valid": False, "error": f"解析备份包失败: {e}"}
@@ -311,6 +338,8 @@ def list_local_backups(backup_dir: str = None) -> list:
                     "hostname": info["manifest"].get("hostname", ""),
                     "created_at": info["manifest"].get("created_at", ""),
                     "notes": info["manifest"].get("notes", ""),
-                    "size_mb": info["size_mb"]
+                    "size_mb": info["size_mb"],
+                    "size_bytes": info.get("size_bytes", 0),
+                    "size_str": info.get("size_str", f"{info['size_mb']} MB")
                 })
     return sorted(backups, key=lambda x: x["created_at"], reverse=True)

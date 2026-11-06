@@ -371,7 +371,7 @@ class MasterAppUI:
 
         lbl_sub = tk.Label(
             title_box,
-            text="Master Controller Hub · 集群TCP: 9888 | 中控总线: UDP 9889 | TCP 9890 | HTTP 9891 | 串口COM | 桌面推流: 5900",
+            text="Industrial Intelligent Operations Center · 展馆智能集群综合管控中心",
             font=("Segoe UI", 8),
             bg=self.BG_PANEL,
             fg=self.TEXT_MUTED
@@ -409,10 +409,10 @@ class MasterAppUI:
         )
         btn_search.pack(side=tk.LEFT, padx=6)
 
-        # 中控接口文档帮助按钮: 【📖 中控全协议 (UDP/TCP/HTTP/串口) 与推流 API 手册】
+        # 中控安全协议按钮
         btn_udp_doc = tk.Button(
             top_bar,
-            text="📖 中控全协议与推流API",
+            text="📖 中控安全协议",
             font=("Segoe UI", 9, "bold"),
             bg="#1e293b",
             fg="#38bdf8",
@@ -465,7 +465,7 @@ class MasterAppUI:
         # 左侧: 在线工控机大厅表格
         left = tk.LabelFrame(
             paned,
-            text=" 🖥️ 展馆在线工控机监控大厅 (单击选定预览 · 双击进入全屏控制) ",
+            text=" 展馆监控大厅 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_CYAN,
             bg=self.BG_PANEL,
@@ -507,7 +507,7 @@ class MasterAppUI:
 
         lbl_tip = tk.Label(
             left_tool,
-            text="右键快捷操作 · 双击全屏控制 (WebRTC 回传)",
+            text="双击从机小屏预览 · 右键弹出功能菜单",
             font=("Segoe UI", 8),
             bg=self.BG_PANEL,
             fg=self.TEXT_MUTED
@@ -537,9 +537,9 @@ class MasterAppUI:
         self.client_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=6)
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y, pady=6, padx=(0, 6))
 
-        # 事件绑定：单击选定设备展示状态，双击全屏桌面控制
+        # 事件绑定：单击选定展示状态，双击小屏预览
         self.client_tree.bind("<<TreeviewSelect>>", self._on_client_tree_select)
-        self.client_tree.bind("<Double-1>", lambda e: self._open_remote_desktop(fullscreen=True))
+        self.client_tree.bind("<Double-1>", lambda e: self._open_remote_desktop(fullscreen=False))
         self.client_tree.bind("<Button-3>", self._show_client_context_menu)
 
         # 右键上下文菜单
@@ -548,7 +548,7 @@ class MasterAppUI:
         # 右侧: 选定设备即时控制面板
         right = tk.LabelFrame(
             paned,
-            text=" ⚡ 选定设备即时控制面板 ",
+            text=" 选定设备控制面板 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_GREEN,
             bg=self.BG_PANEL,
@@ -559,10 +559,11 @@ class MasterAppUI:
 
     def _build_context_menu(self):
         self.context_menu = tk.Menu(self.root, tearoff=0, bg="#1e293b", fg="#ffffff", activebackground="#0284c7")
-        self.context_menu.add_command(label="⚡ WebRTC 远程桌面回传 (全屏控制)", command=lambda: self._open_remote_desktop(fullscreen=True))
-        self.context_menu.add_command(label="📁 自定义受控电脑文件夹 (上传/下载/删除)", command=self._open_remote_file_transfer)
+        self.context_menu.add_command(label="🖥️ 小屏预览 (双击)", command=lambda: self._open_remote_desktop(fullscreen=False))
+        self.context_menu.add_command(label="⛶ 全屏桌面控制", command=lambda: self._open_remote_desktop(fullscreen=True))
+        self.context_menu.add_command(label="📁 文件管理", command=self._open_remote_file_transfer)
         self.context_menu.add_separator()
-        self.context_menu.add_command(label="✏️ 设置/修改设备别名", command=self._edit_client_alias)
+        self.context_menu.add_command(label="✏️ 修改设备别名", command=self._edit_client_alias)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="⚡ 远程关机", command=self._ctl_shutdown)
         self.context_menu.add_command(label="🔄 远程重启", command=self._ctl_reboot)
@@ -628,42 +629,28 @@ class MasterAppUI:
         )
         btn_clear_alias.pack(side=tk.LEFT, padx=2)
 
-        # 快捷桌面与文件互传入口 (删除 WebRTC 窗口模式，避免冲突)
+        # 快捷文件管理入口 (双击从机小屏预览，右侧保留文件管理)
         desk_bar = tk.Frame(parent, bg=self.BG_PANEL)
         desk_bar.pack(fill=tk.X, padx=12, pady=4)
 
-        btn_webrtc_full = tk.Button(
+        btn_fs = tk.Button(
             desk_bar,
-            text="⚡ WebRTC 远程桌面回传 (全屏/双击)",
+            text="📁 文件管理 (受控端)",
             font=("Segoe UI", 9, "bold"),
-            bg="#0284c7",
+            bg="#334155",
             fg="#ffffff",
             relief="flat",
             padx=12,
             pady=4,
             cursor="hand2",
-            command=lambda: self._open_remote_desktop(fullscreen=True)
-        )
-        btn_webrtc_full.pack(side=tk.LEFT, padx=(0, 6))
-
-        btn_fs = tk.Button(
-            desk_bar,
-            text="📁 自定义受控电脑文件夹 (文件管理)",
-            font=("Segoe UI", 9, "bold"),
-            bg="#334155",
-            fg="#ffffff",
-            relief="flat",
-            padx=8,
-            pady=4,
-            cursor="hand2",
             command=self._open_remote_file_transfer
         )
-        btn_fs.pack(side=tk.LEFT, padx=2)
+        btn_fs.pack(side=tk.LEFT)
 
         # 快捷控制指令 (电源、音量、预设调用)
         ctl_box = tk.LabelFrame(
             parent,
-            text="🕹️ 远程中控快捷指令与应用调用",
+            text=" 快捷控制与预设应用 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_YELLOW,
             bg=self.BG_PANEL,
@@ -790,40 +777,10 @@ class MasterAppUI:
             command=self._ctl_run_app
         ).pack(side=tk.RIGHT)
 
-        # 第 4 行: 视频推流地址与 API 接口标注
-        r4 = tk.Frame(ctl_box, bg=self.BG_PANEL)
-        r4.pack(fill=tk.X, padx=8, pady=(2, 6))
-
-        tk.Label(r4, text="推流/API:", font=("Segoe UI", 8, "bold"), fg="#10b981", bg=self.BG_PANEL).pack(side=tk.LEFT)
-        self.stream_url_var = tk.StringVar(value="-- 请在左侧列表中选定工控机 --")
-        ent_stream = tk.Entry(r4, textvariable=self.stream_url_var, font=("Consolas", 8), bg="#0f172a", fg="#34d399", relief="flat")
-        ent_stream.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-
-        def copy_stream_addr():
-            u = self.stream_url_var.get().strip()
-            if u and "--" not in u:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(u)
-                self.notice_var.set(f"已复制设备视频推流/API地址: {u}")
-                messagebox.showinfo("已复制", f"已复制工控机视频推流与API接口地址:\n{u}")
-
-        tk.Button(
-            r4,
-            text="📋 复制推流与API",
-            font=("Segoe UI", 8),
-            bg="#059669",
-            fg="#ffffff",
-            relief="flat",
-            padx=6,
-            pady=1,
-            cursor="hand2",
-            command=copy_stream_addr
-        ).pack(side=tk.RIGHT)
-
         # 运行中软件与进程列表 (支持远程强杀)
         proc_box = tk.LabelFrame(
             parent,
-            text="🛑 运行中应用与进程列表 (可远程结束指定进程)",
+            text=" 运行进程列表 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.TEXT_MUTED,
             bg=self.BG_PANEL,
@@ -845,7 +802,7 @@ class MasterAppUI:
 
         tk.Button(
             proc_btn_bar,
-            text="🛑 强行终止所选进程 (Kill)",
+            text="🛑 终止进程",
             font=("Segoe UI", 8, "bold"),
             bg=self.ACCENT_RED,
             fg="#ffffff",
@@ -1295,11 +1252,12 @@ class MasterAppUI:
             self.master_bk_tree.delete(i)
         bks = self.master_hub.list_master_backups()
         for b in bks:
+            sz_disp = b.get("size_str", f"{b.get('size_mb', 0)} MB")
             self.master_bk_tree.insert(
                 "", "end",
                 iid=b["path"],
                 text=b["filename"],
-                values=(b["hostname"], b["created_at"], f"{b['size_mb']} MB", b["notes"])
+                values=(b["hostname"], b["created_at"], sz_disp, b["notes"])
             )
 
     def _master_push_backup(self):
@@ -1341,7 +1299,7 @@ class MasterAppUI:
         # 左栏: 在线工控机一键远程商业授权与续期
         left = tk.LabelFrame(
             paned,
-            text=" 🛡️ 在线工控机远程商业授权与续期中心 (严禁主控自授权) ",
+            text=" 在线工控机商业授权 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_CYAN,
             bg=self.BG_PANEL,
@@ -1394,7 +1352,7 @@ class MasterAppUI:
         # 授权模式与自定义时间配置区
         auth_card = tk.LabelFrame(
             left,
-            text=" ⚙️ 授权有效期与时间定制 (小时 / 月 / 永久) ",
+            text=" 授权有效期定制 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_YELLOW,
             bg=self.BG_PANEL,
@@ -1409,19 +1367,19 @@ class MasterAppUI:
         mode_bar.pack(fill=tk.X, padx=8, pady=(4, 4))
 
         tk.Radiobutton(
-            mode_bar, text="⏱️ 按小时授权 (自定义)", variable=self.auth_mode_var, value="hour",
+            mode_bar, text="⏱️ 按小时授权", variable=self.auth_mode_var, value="hour",
             bg=self.BG_PANEL, fg=self.TEXT_WHITE, selectcolor="#0f172a", font=("Segoe UI", 9, "bold"),
             command=self._on_auth_mode_change
         ).pack(side=tk.LEFT, padx=4)
 
         tk.Radiobutton(
-            mode_bar, text="📅 按月授权 (自定义)", variable=self.auth_mode_var, value="month",
+            mode_bar, text="📅 按月授权", variable=self.auth_mode_var, value="month",
             bg=self.BG_PANEL, fg=self.TEXT_WHITE, selectcolor="#0f172a", font=("Segoe UI", 9, "bold"),
             command=self._on_auth_mode_change
         ).pack(side=tk.LEFT, padx=12)
 
         tk.Radiobutton(
-            mode_bar, text="♾️ 永久商业授权 (终身有效)", variable=self.auth_mode_var, value="permanent",
+            mode_bar, text="♾️ 商业授权 (永久)", variable=self.auth_mode_var, value="permanent",
             bg=self.BG_PANEL, fg="#34d399", selectcolor="#0f172a", font=("Segoe UI", 9, "bold"),
             command=self._on_auth_mode_change
         ).pack(side=tk.LEFT, padx=4)
@@ -1446,7 +1404,7 @@ class MasterAppUI:
 
         btn_auth = tk.Button(
             btn_action_bar,
-            text="⚡ 立即远程签发并更新授权 (终端自动生效)",
+            text="🚀 立即远程签发授权",
             font=("Segoe UI", 10, "bold"),
             bg="#059669",
             fg="#ffffff",
@@ -1463,7 +1421,7 @@ class MasterAppUI:
         # 右栏: 独立的国文创加密机计算器
         right = tk.LabelFrame(
             paned,
-            text=" 🔑 独立《国文创加密机》运算终端 ",
+            text=" 🔑 国文创加密机运算终端 ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_GREEN,
             bg=self.BG_PANEL,

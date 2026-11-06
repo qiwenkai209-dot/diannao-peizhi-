@@ -301,6 +301,7 @@ class GwcAgentClient:
                         "success": True,
                         "filename": res["filename"],
                         "size_mb": res["size_mb"],
+                        "size_str": res.get("size_str", f"{res['size_mb']} MB"),
                         "manifest": res["manifest"],
                         "b64_data": b64_content
                     })
@@ -311,14 +312,25 @@ class GwcAgentClient:
                 # 接收主控下发的备份包并在从机执行一键恢复
                 b64_data = payload.get("b64_data", "")
                 filename = payload.get("filename", "remote_restore.gwcbackup")
-                backup_bytes = base64.b64decode(b64_data)
+                if not b64_data:
+                    resp_payload.update({"success": False, "error": "下发的备份数据为空"})
+                else:
+                    backup_bytes = base64.b64decode(b64_data)
+                    save_dir = gwc_backup.get_default_backup_dir()
+                    os.makedirs(save_dir, exist_ok=True)
+                    save_p = os.path.join(save_dir, filename)
+                    with open(save_p, "wb") as f:
+                        f.write(backup_bytes)
+                        f.flush()
+                        os.fsync(f.fileno())
 
-                save_p = os.path.join(gwc_backup.get_default_backup_dir(), filename)
-                with open(save_p, "wb") as f:
-                    f.write(backup_bytes)
-
-                res = gwc_backup.restore_backup_package(save_p)
-                resp_payload.update(res)
+                    # 严格核验备份包完整性
+                    chk = gwc_backup.inspect_backup_package(save_p)
+                    if not chk.get("valid"):
+                        resp_payload.update({"success": False, "error": f"下发备份文件核验失败: {chk.get('error')}"})
+                    else:
+                        res = gwc_backup.restore_backup_package(save_p)
+                        resp_payload.update(res)
 
             elif m_type == "VNC_CAPTURE":
                 quality = payload.get("quality", 65)

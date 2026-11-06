@@ -248,6 +248,8 @@ class GwcMasterHub:
                     save_path = os.path.join(self.backup_store_dir, filename)
                     with open(save_path, "wb") as f:
                         f.write(raw_bytes)
+                        f.flush()
+                        os.fsync(f.fileno())
                     info = gwc_backup.inspect_backup_package(save_path)
                     if self.on_backup_saved:
                         self.on_backup_saved(client_ip, save_path, info)
@@ -261,6 +263,12 @@ class GwcMasterHub:
         if not os.path.isfile(backup_file_path):
             if callback:
                 callback({"success": False, "error": "主控端备份文件不存在"})
+            return False
+
+        chk = gwc_backup.inspect_backup_package(backup_file_path)
+        if not chk.get("valid"):
+            if callback:
+                callback({"success": False, "error": f"备份包无效或损坏: {chk.get('error')}"})
             return False
 
         with open(backup_file_path, "rb") as f:

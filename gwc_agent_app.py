@@ -690,7 +690,7 @@ class AgentAppUI:
         r_port_tag.pack(fill=tk.X, pady=(4, 3))
         tk.Label(
             r_port_tag,
-            text="📌 服务端端口标注:  TCP: 9888 (中控通信链路)  |  WebRTC: 5900 (极速桌面视讯回传)  |  UDP: 9887 (广播雷达探测)",
+            text="📌 服务端端口:  TCP: 9888  |  UDP: 9887  |  VNC/WebRTC: 5900",
             font=("Segoe UI", 8, "bold"),
             bg="#0f172a",
             fg="#38bdf8"
@@ -1360,16 +1360,18 @@ class AgentAppUI:
         b_dir = self.backup_dir_var.get().strip() or gwc_backup.get_default_backup_dir()
         bks = gwc_backup.list_local_backups(backup_dir=b_dir)
         for b in bks:
-            self.bk_tree.insert("", "end", iid=b["path"], text=b["filename"], values=(b["created_at"], f"{b['size_mb']} MB", b["notes"]))
+            sz_disp = b.get("size_str", f"{b.get('size_mb', 0)} MB")
+            self.bk_tree.insert("", "end", iid=b["path"], text=b["filename"], values=(b["created_at"], sz_disp, b["notes"]))
 
     def _create_local_backup(self):
         b_dir = self.backup_dir_var.get().strip() or gwc_backup.get_default_backup_dir()
         def runner():
             res = gwc_backup.create_backup_package(name="", notes="受控端本地一键备份", output_dir=b_dir)
             if res.get("success"):
+                sz_str = res.get("size_str", f"{res.get('size_mb')} MB")
                 self.root.after(0, lambda: (
                     self._refresh_local_backup_tree(),
-                    messagebox.showinfo("备份成功", f"系统配置已成功备份！\n目录: {b_dir}\n文件: {res.get('filename')}\n大小: {res.get('size_mb')} MB")
+                    messagebox.showinfo("备份成功", f"系统配置已成功备份！\n目录: {b_dir}\n文件: {res.get('filename')}\n大小: {sz_str}")
                 ))
             else:
                 self.root.after(0, lambda: messagebox.showerror("备份失败", res.get("error", "未知错误")))
