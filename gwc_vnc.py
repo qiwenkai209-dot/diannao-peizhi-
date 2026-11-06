@@ -99,45 +99,74 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
 
 
 def inject_remote_mouse(event_type: str, x: int, y: int, extra: int = 0):
-    """注入远程鼠标操作 (绝对坐标转换)"""
-    hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
-    if hdesk:
-        user32.SetThreadDesktop(hdesk)
-
+    """
+    注入远程鼠标操作 (支持物理绝对定位、绝对坐标总线派发与精准反控)
+    兼容 Windows 全屏多媒体、DirectX 展厅应用与桌面反控
+    """
     try:
-        user32.SetCursorPos(int(x), int(y))
+        ix = int(x)
+        iy = int(y)
+
+        # 1. 物理鼠标绝对位置定位 (SetCursorPos)
+        user32.SetCursorPos(ix, iy)
+
+        # 2. 计算 Windows 归一化绝对坐标 (0~65535)，用于硬件级事件注入
+        sw = max(1, user32.GetSystemMetrics(0))
+        sh = max(1, user32.GetSystemMetrics(1))
+        nx = int((ix * 65535) / sw)
+        ny = int((iy * 65535) / sh)
+
+        base_flag = MOUSEEVENTF_ABSOLUTE
+
         if event_type == "move":
-            pass
+            user32.mouse_event(base_flag | MOUSEEVENTF_MOVE, nx, ny, 0, 0)
         elif event_type == "left_down":
-            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
         elif event_type == "left_up":
-            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
+        elif event_type == "click":
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            time.sleep(0.015)
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
+        elif event_type == "double_click":
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            time.sleep(0.01)
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
+            time.sleep(0.06)
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            time.sleep(0.01)
+            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
         elif event_type == "right_down":
-            user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+            user32.mouse_event(base_flag | MOUSEEVENTF_RIGHTDOWN, nx, ny, 0, 0)
         elif event_type == "right_up":
-            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+            user32.mouse_event(base_flag | MOUSEEVENTF_RIGHTUP, nx, ny, 0, 0)
+        elif event_type == "middle_down":
+            user32.mouse_event(base_flag | MOUSEEVENTF_MIDDLEDOWN, nx, ny, 0, 0)
+        elif event_type == "middle_up":
+            user32.mouse_event(base_flag | MOUSEEVENTF_MIDDLEUP, nx, ny, 0, 0)
         elif event_type == "wheel":
             user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, int(extra), 0)
     except Exception:
         pass
-    finally:
-        if hdesk:
-            user32.CloseDesktop(hdesk)
 
 
 def inject_remote_key(vk: int, is_down: bool):
-    """注入远程键盘按键事件"""
-    hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
-    if hdesk:
-        user32.SetThreadDesktop(hdesk)
+    """注入远程键盘按键事件 (支持按下与释放)"""
     try:
         flags = 0 if is_down else 2
-        user32.keybd_event(vk, 0, flags, 0)
+        user32.keybd_event(int(vk), 0, flags, 0)
     except Exception:
         pass
-    finally:
-        if hdesk:
-            user32.CloseDesktop(hdesk)
+
+
+def inject_remote_key_click(vk: int):
+    """模拟按键按下并立即安全抬起，杜绝粘键"""
+    try:
+        user32.keybd_event(int(vk), 0, 0, 0)
+        time.sleep(0.015)
+        user32.keybd_event(int(vk), 0, 2, 0)
+    except Exception:
+        pass
 
 
 # ==================== 远程文件系统操作 (从机端处理) ====================
@@ -361,6 +390,9 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self.last_frame_time = time.time()
         self.fps_counter = 0
         self.current_fps = 30
+        self._canvas_img_id = None
+        self._last_mouse_send_time = 0
+        self._last_mouse_pos = (-1, -1)
 
         self._setup_ui()
         self._bind_events()
@@ -376,7 +408,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
 
         tk.Label(
             toolbar,
-            text=f"⚡ WebRTC 远程回传: {self.client_name} ({self.client_ip})",
+            text=f"⚡ WebRTC 远程桌面: {self.client_name} ({self.client_ip})",
             font=("Segoe UI", 10, "bold"),
             fg="#38bdf8",
             bg="#1e293b"
@@ -384,7 +416,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
 
         self.fps_lbl = tk.Label(
             toolbar,
-            text="⚡ 协议: WebRTC (超低延迟传输) | 延迟: -- ms | 帧率: -- FPS | 分辨率: --",
+            text="⚡ 协议: WebRTC (超低延迟视讯传输) | 延迟: -- ms | 帧率: -- FPS | 分辨率: --",
             font=("Segoe UI", 9),
             fg="#10b981",
             bg="#1e293b"
@@ -392,18 +424,20 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self.fps_lbl.pack(side=tk.LEFT, padx=10)
 
         # 画质切换
-        tk.Label(toolbar, text="回传画质:", font=("Segoe UI", 9), fg="#cbd5e1", bg="#1e293b").pack(side=tk.LEFT, padx=(15, 2))
+        tk.Label(toolbar, text="画质:", font=("Segoe UI", 9), fg="#cbd5e1", bg="#1e293b").pack(side=tk.LEFT, padx=(10, 2))
         self.qual_combo = ttk.Combobox(toolbar, values=["超高速 (低画质/30FPS)", "均衡推荐 (标清/30FPS)", "高清超清 (高画质/24FPS)"], state="readonly", width=18)
         self.qual_combo.current(1)
         self.qual_combo.pack(side=tk.LEFT, padx=4)
         self.qual_combo.bind("<<ComboboxSelected>>", self._on_quality_change)
 
-        # 快捷操作
-        tk.Button(toolbar, text="⛶ 全屏控制 (F11)", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=10, pady=2, cursor="hand2", command=self.toggle_fullscreen).pack(side=tk.RIGHT, padx=6)
-        tk.Button(toolbar, text="⚡ 发送 Win+D", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=8, pady=2, command=self._send_win_d).pack(side=tk.RIGHT, padx=4)
-        tk.Button(toolbar, text="🔄 立即刷新帧", font=("Segoe UI", 8), bg="#2563eb", fg="#fff", relief="flat", padx=8, pady=2, command=self._request_frame).pack(side=tk.RIGHT, padx=4)
+        # 快捷反控操作按键 (面向展馆运维高频指令)
+        tk.Button(toolbar, text="⛶ 全屏 (F11)", font=("Segoe UI", 9, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=self.toggle_fullscreen).pack(side=tk.RIGHT, padx=4)
+        tk.Button(toolbar, text="📊 任务管理器", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._send_task_mgr).pack(side=tk.RIGHT, padx=2)
+        tk.Button(toolbar, text="🔄 Alt+Tab", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._send_alt_tab).pack(side=tk.RIGHT, padx=2)
+        tk.Button(toolbar, text="⚡ Win+D", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._send_win_d).pack(side=tk.RIGHT, padx=2)
+        tk.Button(toolbar, text="🔄 刷新帧", font=("Segoe UI", 8), bg="#2563eb", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._request_frame).pack(side=tk.RIGHT, padx=2)
 
-        # 桌面渲染 Canvas (双缓冲黑底)
+        # 桌面渲染 Canvas (双缓冲黑底，点击自动获取键盘焦点)
         self.canvas_frame = tk.Frame(self, bg="#000")
         self.canvas_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -413,13 +447,23 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self.is_fullscreen = False
 
     def _bind_events(self):
+        # 鼠标移动带节流防通道拥塞
         self.canvas.bind("<Motion>", self._on_mouse_move)
+        # 单击与按键反控精准派发
         self.canvas.bind("<Button-1>", lambda e: self._on_mouse_btn("left_down", e))
         self.canvas.bind("<ButtonRelease-1>", lambda e: self._on_mouse_btn("left_up", e))
+        self.canvas.bind("<Double-Button-1>", self._on_mouse_double_click)
+        self.canvas.bind("<Button-2>", lambda e: self._on_mouse_btn("middle_down", e))
+        self.canvas.bind("<ButtonRelease-2>", lambda e: self._on_mouse_btn("middle_up", e))
         self.canvas.bind("<Button-3>", lambda e: self._on_mouse_btn("right_down", e))
         self.canvas.bind("<ButtonRelease-3>", lambda e: self._on_mouse_btn("right_up", e))
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+
+        # 键盘按键与释放完整捕获，杜绝粘键
         self.bind("<KeyPress>", self._on_key_press)
+        self.bind("<KeyRelease>", self._on_key_release)
+        self.canvas.bind("<Button-1>", lambda e: (self.canvas.focus_set(), self._on_mouse_btn("left_down", e)))
+
         self.bind("<F11>", self.toggle_fullscreen)
         self.bind("<Escape>", lambda e: self.exit_fullscreen() if self.is_fullscreen else None)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -436,11 +480,9 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         threading.Thread(target=self._stream_loop, daemon=True).start()
 
     def _stream_loop(self):
-        # WebRTC 超低延迟流式回传循环 (目标 25~30 FPS)
         while self.active:
             t_start = time.time()
             self._request_frame()
-            # 动态根据当前网络和处理能力控制休眠
             elapsed = time.time() - t_start
             sleep_time = max(0.015, (1.0 / self.stream_fps) - elapsed)
             time.sleep(sleep_time)
@@ -482,7 +524,7 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
             self.remote_w = resp.get("orig_w", img.width)
             self.remote_h = resp.get("orig_h", img.height)
 
-            # 获取 canvas 尺寸并缩放
+            # 获取 canvas 尺寸并做自适应居中缩放
             cw = self.canvas.winfo_width()
             ch = self.canvas.winfo_height()
             if cw > 50 and ch > 50:
@@ -496,11 +538,18 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
                 img_disp = img
 
             self.photo_img = ImageTk.PhotoImage(img_disp)
-            self.canvas.delete("all")
-            # 居中渲染
+
+            # 居中渲染坐标
             cx = max(0, (cw - img_disp.width) // 2)
             cy = max(0, (ch - img_disp.height) // 2)
-            self.canvas.create_image(cx, cy, anchor=tk.NW, image=self.photo_img)
+
+            # 增量刷新图元，彻底终结 delete("all") 导致的每秒 30 次剧烈白闪/黑闪！
+            if not self._canvas_img_id:
+                self.canvas.delete("all")
+                self._canvas_img_id = self.canvas.create_image(cx, cy, anchor=tk.NW, image=self.photo_img)
+            else:
+                self.canvas.itemconfigure(self._canvas_img_id, image=self.photo_img)
+                self.canvas.coords(self._canvas_img_id, cx, cy)
 
             self.fps_lbl.config(
                 text=f"⚡ WebRTC 视讯流 (极速低延迟) | 延迟: {latency} ms | 帧率: {self.current_fps} FPS | 分辨率: {self.remote_w}x{self.remote_h}"
@@ -516,19 +565,29 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         cx = max(0, (cw - view_w) // 2)
         cy = max(0, (ch - view_h) // 2)
 
-        rx = int((event.x - cx) / max(0.001, self.scale_factor))
-        ry = int((event.y - cy) / max(0.001, self.scale_factor))
-        rx = max(0, min(self.remote_w, rx))
-        ry = max(0, min(self.remote_h, ry))
+        rx = int((event.x - cx) / max(0.0001, self.scale_factor))
+        ry = int((event.y - cy) / max(0.0001, self.scale_factor))
+        rx = max(0, min(self.remote_w - 1, rx))
+        ry = max(0, min(self.remote_h - 1, ry))
         return rx, ry
 
     def _on_mouse_move(self, event):
         rx, ry = self._map_coords(event)
-        self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "move", "x": rx, "y": ry})
+        now = time.time()
+        # 鼠标移动节流 (控制在约 28 次/秒，杜绝信道拥塞阻塞真实的点击事件)
+        if (now - self._last_mouse_send_time >= 0.035) and ((rx, ry) != self._last_mouse_pos):
+            self._last_mouse_send_time = now
+            self._last_mouse_pos = (rx, ry)
+            self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "move", "x": rx, "y": ry})
 
     def _on_mouse_btn(self, btn_type, event):
         rx, ry = self._map_coords(event)
+        # 点击事件绝不节流，立即优先派发，并且携带高精度坐标定位
         self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": btn_type, "x": rx, "y": ry})
+
+    def _on_mouse_double_click(self, event):
+        rx, ry = self._map_coords(event)
+        self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "double_click", "x": rx, "y": ry})
 
     def _on_mouse_wheel(self, event):
         rx, ry = self._map_coords(event)
@@ -538,8 +597,18 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         vk = event.keycode
         self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "key_press", "vk": vk})
 
+    def _on_key_release(self, event):
+        vk = event.keycode
+        self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "key_release", "vk": vk})
+
     def _send_win_d(self):
         self.send_cmd_fn(self.client_ip, "RUN_APP", {"path": "powershell", "args": "-Command (New-Object -ComObject Shell.Application).ToggleDesktop()"})
+
+    def _send_task_mgr(self):
+        self.send_cmd_fn(self.client_ip, "RUN_APP", {"path": "taskmgr.exe"})
+
+    def _send_alt_tab(self):
+        self.send_cmd_fn(self.client_ip, "VNC_INPUT", {"action": "alt_tab"})
 
     def _on_quality_change(self, event):
         sel = self.qual_combo.get()

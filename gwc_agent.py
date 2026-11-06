@@ -335,15 +335,33 @@ class GwcAgentClient:
                 act = payload.get("action")
                 x = payload.get("x", 0)
                 y = payload.get("y", 0)
-                if act in ["move", "left_down", "left_up", "right_down", "right_up"]:
+                if act in ["move", "left_down", "left_up", "right_down", "right_up", "middle_down", "middle_up", "click", "double_click"]:
                     gwc_vnc.inject_remote_mouse(act, x, y)
                 elif act == "wheel":
                     gwc_vnc.inject_remote_mouse("wheel", x, y, extra=payload.get("extra", 0))
                 elif act == "key_press":
-                    gwc_vnc.inject_remote_key(payload.get("vk", 0), True)
+                    vk = payload.get("vk", 0)
+                    gwc_vnc.inject_remote_key(vk, True)
+                    # 看门狗守护防粘键: 300ms 后若未收到 key_release 则自动抬起
+                    def _auto_unstick(vk_code):
+                        time.sleep(0.3)
+                        gwc_vnc.inject_remote_key(vk_code, False)
+                    threading.Thread(target=_auto_unstick, args=(vk,), daemon=True).start()
                 elif act == "key_release":
                     gwc_vnc.inject_remote_key(payload.get("vk", 0), False)
-                return  # 输入事件不回传大响应，降低开销
+                elif act == "key_click":
+                    gwc_vnc.inject_remote_key_click(payload.get("vk", 0))
+                elif act == "alt_tab":
+                    # 模拟 Alt+Tab 切换窗口
+                    try:
+                        gwc_vnc.user32.keybd_event(0x12, 0, 0, 0)      # Alt down
+                        gwc_vnc.user32.keybd_event(0x09, 0, 0, 0)      # Tab down
+                        time.sleep(0.02)
+                        gwc_vnc.user32.keybd_event(0x09, 0, 2, 0)      # Tab up
+                        gwc_vnc.user32.keybd_event(0x12, 0, 2, 0)      # Alt up
+                    except Exception:
+                        pass
+                return  # 输入事件不回传大响应，降低信道开销保证流畅度
 
             elif m_type == "FS_LIST":
                 res = gwc_vnc.handle_fs_list(payload.get("path", ""))
