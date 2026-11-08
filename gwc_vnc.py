@@ -325,7 +325,7 @@ class StandaloneRfbVncServer:
             conn.sendall(init_pkt)
             conn.settimeout(None)
 
-            # 6. RFB 事件与流循环
+            # 6. RFB 事件与流循环 (标准 VNC6 / RFB 3.8 兼容处理)
             while self.running:
                 msg_type = conn.recv(1)
                 if not msg_type:
@@ -336,26 +336,48 @@ class StandaloneRfbVncServer:
                 elif t == 2:  # SetEncodings
                     _, n_enc = struct.unpack(">xH", conn.recv(3))
                     conn.recv(n_enc * 4)
-                elif t == 3:  # FramebufferUpdateRequest
+                elif t == 3:  # FramebufferUpdateRequest (客户端请求屏幕更新)
                     req = conn.recv(9)
                     if len(req) < 9:
                         break
-                    # 抓取并回传屏幕
-                    jpeg_bytes, scr_w, scr_h = capture_desktop_image(quality=60, scale=0.75)
-                    # 发送 Raw 编码矩形 (此处为简化稳健流)
-                    # 保持连接活跃
+                    try:
+                        # 抓取屏幕图像并以标准 VNC RFB Raw 编码回传
+                        img = ImageGrab.grab(all_screens=True)
+                        scr_w, scr_h = img.size
+                        # 限制分辨率至系统主屏以防超大显存溢出
+                        max_w = min(scr_w, 1920)
+                        max_h = min(scr_h, 1080)
+                        if (scr_w, scr_h) != (max_w, max_h):
+                            img = img.resize((max_w, max_h), Image.Resampling.BILINEAR)
+                            scr_w, scr_h = max_w, max_h
+                        raw_bytes = img.convert("RGB").tobytes("raw", "BGRX")
+                        # 标准 FramebufferUpdate 报文: [type=0, pad=0, 1 rect] + [x=0, y=0, w, h, enc=0] + 像素数据
+                        fb_hdr = struct.pack(">BBHHHHI", 0, 0, 1, 0, 0, scr_w, scr_h, 0)
+                        conn.sendall(fb_hdr + raw_bytes)
+                    except Exception:
+                        pass
                 elif t == 4:  # KeyEvent
                     key_data = conn.recv(7)
                     if len(key_data) == 7:
                         down, _, key = struct.unpack(">BxI", key_data[:6])
-                        # 转换常用按键
                         if key < 256:
                             inject_remote_key(key, down != 0)
-                elif t == 5:  # PointerEvent
+                elif t == 5:  # PointerEvent (鼠标坐标与点击)
                     ptr_data = conn.recv(5)
                     if len(ptr_data) == 5:
                         btn_mask, px, py = struct.unpack(">BHH", ptr_data)
-                        inject_remote_mouse("move", px, py)
+                        if btn_mask & 1:
+                            inject_remote_mouse("left_down", px, py)
+                            inject_remote_mouse("left_up", px, py)
+                        elif btn_mask & 4:
+                            inject_remote_mouse("right_down", px, py)
+                            inject_remote_mouse("right_up", px, py)
+                        elif btn_mask & 8:
+                            inject_remote_mouse("wheel", px, py, extra=120)
+                        elif btn_mask & 16:
+                            inject_remote_mouse("wheel", px, py, extra=-120)
+                        else:
+                            inject_remote_mouse("move", px, py)
                 elif t == 6:  # ClientCutText
                     _, length = struct.unpack(">xxI", conn.recv(6))
                     conn.recv(length)
@@ -368,12 +390,12 @@ class StandaloneRfbVncServer:
                 pass
 
 
-# ==================== 主控端嵌入式远程控制桌面视窗 (小屏预览 / 全屏) ====================
-class WebRTCRemoteDesktopWindow(tk.Toplevel):
-    """主控端极速低延迟远程桌面视窗 (超低延迟视讯流回传、实时键鼠映射与动态画质自适应)"""
+# ==================== 主控端嵌入式远程控制桌面视窗 (VNC6 架构 / 小屏预览 / 全屏) ====================
+class VNC6RemoteDesktopWindow(tk.Toplevel):
+    """主控端 VNC6 架构工业级远程桌面视窗 (支持内置极速视讯回传 + 外部 RealVNC 6/TightVNC 一键联通)"""
     def __init__(self, master, client_ip: str, client_name: str, send_cmd_fn, fullscreen: bool = False):
         super().__init__(master)
-        self.title(f"🖥️ 远程桌面预览 - [{client_name}] ({client_ip})")
+        self.title(f"🖥️ 远程桌面 (VNC6 架构) - [{client_name}] ({client_ip})")
         self.geometry("960x640")
         self.minsize(640, 480)
         self.configure(bg="#0b0f19")
@@ -404,13 +426,13 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
             self.after(100, self.toggle_fullscreen)
 
     def _setup_ui(self):
-        # 顶部状态与控制栏 (简洁清爽)
+        # 顶部状态与控制栏 (简洁清爽，集成 VNC6 外部联动)
         toolbar = tk.Frame(self, bg="#1e293b", height=38)
         toolbar.pack(fill=tk.X, side=tk.TOP)
 
         tk.Label(
             toolbar,
-            text=f"🖥️ 远程桌面: {self.client_name} ({self.client_ip})",
+            text=f"🖥️ VNC6 远程桌面: {self.client_name} ({self.client_ip})",
             font=("Segoe UI", 9, "bold"),
             fg="#38bdf8",
             bg="#1e293b"
@@ -432,9 +454,10 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self.qual_combo.pack(side=tk.LEFT, padx=2)
         self.qual_combo.bind("<<ComboboxSelected>>", self._on_quality_change)
 
-        # 简洁右侧操作按键: 仅保留全屏与刷新
+        # 简洁右侧操作按键: 全屏、刷新及外部 VNC6 客户端拉起
         tk.Button(toolbar, text="⛶ 全屏 (F11)", font=("Segoe UI", 8, "bold"), bg="#0284c7", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=self.toggle_fullscreen).pack(side=tk.RIGHT, padx=4)
         tk.Button(toolbar, text="🔄 刷新", font=("Segoe UI", 8), bg="#2563eb", fg="#fff", relief="flat", padx=6, pady=2, cursor="hand2", command=self._force_request_frame).pack(side=tk.RIGHT, padx=2)
+        tk.Button(toolbar, text="🔗 外部 VNC6 Viewer", font=("Segoe UI", 8), bg="#334155", fg="#38bdf8", relief="flat", padx=8, pady=2, cursor="hand2", command=self._launch_external_vnc).pack(side=tk.RIGHT, padx=4)
 
         # 桌面渲染 Canvas (双缓冲黑底，点击自动获取键盘焦点)
         self.canvas_frame = tk.Frame(self, bg="#000")
@@ -444,6 +467,49 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.photo_img = None
         self.is_fullscreen = False
+
+    def _launch_external_vnc(self):
+        """一键调用或调起外部专业 VNC6 客户端 (RealVNC Viewer 6.x / TightVNC / UltraVNC)"""
+        target = f"{self.client_ip}:5900"
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(target)
+        except Exception:
+            pass
+
+        candidates = [
+            r"C:\Program Files\RealVNC\VNC Viewer\vncviewer.exe",
+            r"C:\Program Files (x86)\RealVNC\VNC Viewer\vncviewer.exe",
+            r"C:\Program Files\TightVNC\tvnviewer.exe",
+            r"C:\Program Files\UltraVNC\vncviewer.exe",
+            r"C:\Program Files\TigerVNC\vncviewer.exe",
+            "vncviewer.exe"
+        ]
+        launched = False
+        for c in candidates:
+            if os.path.isfile(c):
+                try:
+                    subprocess.Popen([c, target])
+                    launched = True
+                    break
+                except Exception:
+                    pass
+
+        if not launched:
+            try:
+                os.startfile(f"vnc://{target}")
+                launched = True
+            except Exception:
+                pass
+
+        if launched:
+            messagebox.showinfo("VNC6 Viewer 已拉起", f"已成功调起外部专业 VNC6 客户端连接至:\n{target}", parent=self)
+        else:
+            messagebox.showinfo(
+                "VNC6 服务已就绪",
+                f"从机 VNC6 服务已在 5900 端口持续运行！\n\n已自动复制连接地址到剪贴板:\n{target}\n\n您可直接打开 RealVNC Viewer 6.x 粘贴地址快速连接。",
+                parent=self
+            )
 
     def _bind_events(self):
         # 鼠标移动带节流防通道拥塞
@@ -513,8 +579,32 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
         self._frame_in_flight = False
         if not self.active or not resp or not resp.get("success"):
             return
+
+        raw_bytes = None
+        b64_img = resp.get("b64_image")
+        if b64_img:
+            try:
+                raw_bytes = base64.b64decode(b64_img)
+            except Exception:
+                pass
+        else:
+            raw_bytes = resp.get("image_bytes")
+
+        if not raw_bytes:
+            return
+
+        latency = int((time.time() - t0) * 1000)
+        # 核心关键修复: 彻底将解码与 Tkinter 画面渲染调度至主 UI 线程，彻底根除跨线程无画面/黑屏！
         try:
-            latency = int((time.time() - t0) * 1000)
+            self.after(0, lambda: self._render_ui_frame(raw_bytes, resp.get("orig_w", 0), resp.get("orig_h", 0), latency))
+        except Exception:
+            pass
+
+    def _render_ui_frame(self, raw_bytes: bytes, orig_w: int, orig_h: int, latency: int):
+        """在 Tkinter 主 UI 线程中安全执行图像解码与 Canvas 渲染"""
+        if not self.active:
+            return
+        try:
             self.fps_counter += 1
             now = time.time()
             if now - self.last_frame_time >= 1.0:
@@ -522,19 +612,9 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
                 self.fps_counter = 0
                 self.last_frame_time = now
 
-            raw_bytes = None
-            b64_img = resp.get("b64_image")
-            if b64_img:
-                raw_bytes = base64.b64decode(b64_img)
-            else:
-                raw_bytes = resp.get("image_bytes")
-
-            if not raw_bytes:
-                return
-
             img = Image.open(io.BytesIO(raw_bytes))
-            self.remote_w = resp.get("orig_w", img.width)
-            self.remote_h = resp.get("orig_h", img.height)
+            self.remote_w = orig_w if orig_w > 0 else img.width
+            self.remote_h = orig_h if orig_h > 0 else img.height
 
             # 获取 canvas 尺寸并做自适应居中缩放
             cw = self.canvas.winfo_width()
@@ -632,7 +712,8 @@ class WebRTCRemoteDesktopWindow(tk.Toplevel):
 
 
 # 兼容原有调用的别名
-RemoteDesktopWindow = WebRTCRemoteDesktopWindow
+WebRTCRemoteDesktopWindow = VNC6RemoteDesktopWindow
+RemoteDesktopWindow = VNC6RemoteDesktopWindow
 
 
 # ==================== 主控端从机远程文件管理器 (自定义文件夹 · 上传/下载/删除) ====================

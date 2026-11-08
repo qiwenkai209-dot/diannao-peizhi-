@@ -559,7 +559,7 @@ class MasterAppUI:
 
     def _build_context_menu(self):
         self.context_menu = tk.Menu(self.root, tearoff=0, bg="#1e293b", fg="#ffffff", activebackground="#0284c7")
-        self.context_menu.add_command(label="🖥️ 小屏预览 (双击)", command=lambda: self._open_remote_desktop(fullscreen=False))
+        self.context_menu.add_command(label="🖥️ 小屏预览 (VNC6 / 双击)", command=lambda: self._open_remote_desktop(fullscreen=False))
         self.context_menu.add_command(label="⛶ 全屏桌面控制", command=lambda: self._open_remote_desktop(fullscreen=True))
         self.context_menu.add_command(label="📁 文件管理", command=self._open_remote_file_transfer)
         self.context_menu.add_separator()
@@ -1793,7 +1793,7 @@ class MasterAppUI:
         def send_fn(client_ip, cmd_type, payload, callback=None):
             self.master_hub.send_command(client_ip, cmd_type, payload, callback=callback)
 
-        gwc_vnc.WebRTCRemoteDesktopWindow(self.root, ip, h_name, send_fn, fullscreen=fullscreen)
+        gwc_vnc.VNC6RemoteDesktopWindow(self.root, ip, h_name, send_fn, fullscreen=fullscreen)
 
     def _open_remote_file_transfer(self):
         ip = self._get_selected_client_ip()
