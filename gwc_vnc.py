@@ -34,6 +34,15 @@ import gwc_crypto
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 
+# 开启 Windows 进程 DPI 高清感知，杜绝 125%/150% 缩放下图像模糊及鼠标像素错位
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -45,14 +54,17 @@ MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_ABSOLUTE = 0x8000
 
 
-def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
+def capture_desktop_image(quality: int = 70, scale: float = 1.0) -> tuple:
     """
-    截取当前桌面图像并编码为 JPEG 字节 (多屏幕/全屏支持与 CAPTUREBLT 防黑屏)
+    截取当前桌面图像并编码为 JPEG 字节 (基准对齐主屏幕真实物理尺寸，确保键鼠反控 100% 像素级对齐)
     返回: (jpeg_bytes, width, height)
     """
     try:
-        # 优先使用 Pillow 原生截屏，开启全屏幕捕获
-        img = ImageGrab.grab(all_screens=True)
+        # 获取主屏真实物理分辨率
+        sw = user32.GetSystemMetrics(0)
+        sh = user32.GetSystemMetrics(1)
+        # 精准截取主屏幕区域 (0, 0, sw, sh)，杜绝多显示器虚拟屏扩展导致的反控错位
+        img = ImageGrab.grab(bbox=(0, 0, sw, sh))
         orig_w, orig_h = img.size
 
         if scale < 0.99:
@@ -64,7 +76,7 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
         img.save(buf, format='JPEG', quality=quality)
         return buf.getvalue(), orig_w, orig_h
     except Exception:
-        # GDI 降级截屏 (加入 0x40000000 CAPTUREBLT 防止半透明或 DirectX 窗口黑屏)
+        # GDI 降级截屏 (严格按主屏物理宽高捕获)
         try:
             w = user32.GetSystemMetrics(0)
             h = user32.GetSystemMetrics(1)
@@ -76,7 +88,6 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
             # 0x40CC0020 = SRCCOPY (0x00CC0020) | CAPTUREBLT (0x40000000)
             gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, 0x40CC0020)
 
-            # 24 位 BMP 要求每行像素字节为 4 字节对齐
             stride = ((w * 3 + 3) // 4) * 4
             bmi = struct.pack("IiiHHIIiiII", 40, w, -h, 1, 24, 0, 0, 0, 0, 0, 0)
             raw_buf = ctypes.create_string_buffer(stride * h)
@@ -100,50 +111,48 @@ def capture_desktop_image(quality: int = 65, scale: float = 1.0) -> tuple:
 
 def inject_remote_mouse(event_type: str, x: int, y: int, extra: int = 0):
     """
-    注入远程鼠标操作 (支持物理绝对定位、绝对坐标总线派发与精准反控)
-    兼容 Windows 全屏多媒体、DirectX 展厅应用与桌面反控
+    注入远程鼠标操作 (100% 物理像素级精准对齐，彻底根除高分屏/DPI缩放位置偏差)
     """
     try:
         ix = int(x)
         iy = int(y)
 
-        # 1. 物理鼠标绝对位置定位 (SetCursorPos)
-        user32.SetCursorPos(ix, iy)
-
-        # 2. 计算 Windows 归一化绝对坐标 (0~65535)，用于硬件级事件注入
+        # 屏幕边界保护
         sw = max(1, user32.GetSystemMetrics(0))
         sh = max(1, user32.GetSystemMetrics(1))
-        nx = int((ix * 65535) / sw)
-        ny = int((iy * 65535) / sh)
+        ix = max(0, min(sw - 1, ix))
+        iy = max(0, min(sh - 1, iy))
 
-        base_flag = MOUSEEVENTF_ABSOLUTE
+        # 1. 物理鼠标绝对位置定位 (SetCursorPos: 直接设定物理光标，像素级精准无偏移)
+        user32.SetCursorPos(ix, iy)
 
+        # 2. 派发鼠标事件: 光标已精准落在目标点，直接派发相对点击，杜绝 65535 归一化二次偏移！
         if event_type == "move":
-            user32.mouse_event(base_flag | MOUSEEVENTF_MOVE, nx, ny, 0, 0)
+            pass
         elif event_type == "left_down":
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         elif event_type == "left_up":
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         elif event_type == "click":
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.015)
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         elif event_type == "double_click":
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.01)
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
-            time.sleep(0.06)
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.05)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.01)
-            user32.mouse_event(base_flag | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         elif event_type == "right_down":
-            user32.mouse_event(base_flag | MOUSEEVENTF_RIGHTDOWN, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
         elif event_type == "right_up":
-            user32.mouse_event(base_flag | MOUSEEVENTF_RIGHTUP, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
         elif event_type == "middle_down":
-            user32.mouse_event(base_flag | MOUSEEVENTF_MIDDLEDOWN, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0)
         elif event_type == "middle_up":
-            user32.mouse_event(base_flag | MOUSEEVENTF_MIDDLEUP, nx, ny, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0)
         elif event_type == "wheel":
             user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, int(extra), 0)
     except Exception:

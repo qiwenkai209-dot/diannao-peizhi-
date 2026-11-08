@@ -30,6 +30,16 @@ from tkinter import ttk, messagebox, filedialog
 import platform
 import psutil
 
+# 启用 Windows 进程级高 DPI 缩放感知，提升高清屏幕清晰度
+try:
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
+
 import gwc_crypto
 import gwc_system_ops
 import gwc_monitor
@@ -215,14 +225,14 @@ class AgentAppUI:
     def __init__(self, root: tk.Tk, silent_startup: bool = False):
         self.root = root
         self.root.title("展馆控制终端")
-        self.root.geometry("880x720")
-        self.root.minsize(800, 640)
+        self.root.geometry("1060x820")
+        self.root.minsize(960, 700)
         self.root.configure(bg="#0b0f19")
 
         # 居中显示
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
-        self.root.geometry(f"880x720+{(ws-880)//2}+{(hs-720)//2}")
+        self.root.geometry(f"1060x820+{(ws-1060)//2}+{(hs-820)//2}")
 
         # 窗口图标
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gear.ico")
@@ -273,6 +283,7 @@ class AgentAppUI:
         self.master_port_var = tk.StringVar(value=str(master_port))
         self.custom_name_var = tk.StringVar(value=self.custom_name)
         self.backup_dir_var = tk.StringVar(value=self.config.get("backup_dir", gwc_backup.get_default_backup_dir()))
+        self.extra_proj_dir_var = tk.StringVar(value=self.config.get("backup_proj_dir", ""))
         self.opt_status_var = tk.StringVar(value="当前就绪：网卡配置就绪 | 策略优化待命 | 内存监控正常")
         self.hotkey_display_var = tk.StringVar(value=self.current_hotkey)
         self.autostart_var = tk.BooleanVar(value=dh.AutoStartManager.is_auto_start_enabled())
@@ -325,11 +336,8 @@ class AgentAppUI:
             self.root.withdraw()
             self._show_license_dialog(reason)
         else:
-            # 授权有效且正常
-            if silent_startup:
-                self.root.withdraw()
-            else:
-                self.root.deiconify()
+            # 授权有效且正常: 启动后默认隐藏后台静默守护，不弹窗遮挡展厅展项，随时按 Ctrl+Q 唤出
+            self.root.withdraw()
 
     def _start_license_guardian(self):
         """后台运行中定期核验授权 (到期即刻锁定终端菜单)"""
@@ -564,8 +572,29 @@ class AgentAppUI:
         ttk.Label(t_box, text="🏛️ 展馆控制终端", style="Title.TLabel").pack(anchor="w")
         ttk.Label(t_box, text="后台轻量守护 · 快捷键 Ctrl+Q 唤出 · 支持中控远程管理与单机深度配置", style="Subtitle.TLabel").pack(anchor="w", pady=(1, 0))
 
+        # 顶部右侧状态与自启切换动作组
+        r_top_actions = tk.Frame(header, bg=self.BG_DARK)
+        r_top_actions.pack(side=tk.RIGHT)
+
+        is_auto = self.autostart_var.get()
+        self.btn_autostart_top = tk.Button(
+            r_top_actions,
+            text="🚀 开机自启: 已开启" if is_auto else "🚀 开机自启: 未开启",
+            font=("Segoe UI", 9, "bold"),
+            bg="#059669" if is_auto else "#334155",
+            fg="#ffffff" if is_auto else "#94a3b8",
+            activebackground="#10b981",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=3,
+            cursor="hand2",
+            command=self._toggle_autostart_from_top
+        )
+        self.btn_autostart_top.pack(side=tk.LEFT, padx=(0, 10))
+
         self.lbl_badge = tk.Label(
-            header,
+            r_top_actions,
             textvariable=self.conn_badge_var,
             font=("Segoe UI", 9, "bold"),
             bg="#1e293b",
@@ -574,7 +603,7 @@ class AgentAppUI:
             pady=3,
             relief="flat"
         )
-        self.lbl_badge.pack(side=tk.RIGHT)
+        self.lbl_badge.pack(side=tk.LEFT)
 
         # 选项卡容器
         self.nb = ttk.Notebook(main_box)
@@ -902,7 +931,7 @@ class AgentAppUI:
 
         # 自定义存储文件夹栏
         dir_acts = tk.Frame(box, bg=self.CARD_BG, padx=10, pady=6)
-        dir_acts.pack(fill=tk.X, pady=(0, 6))
+        dir_acts.pack(fill=tk.X, pady=(0, 4))
 
         tk.Label(dir_acts, text="备份存储目录:", font=("Segoe UI", 9, "bold"), bg=self.CARD_BG, fg="#cbd5e1").pack(side=tk.LEFT)
         ent_bdir = tk.Entry(dir_acts, textvariable=self.backup_dir_var, font=("Consolas", 9), bg="#0f172a", fg="#38bdf8", relief="flat")
@@ -910,6 +939,30 @@ class AgentAppUI:
 
         tk.Button(dir_acts, text="📂 浏览选择...", font=("Segoe UI", 8, "bold"), bg="#334155", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=self._choose_backup_dir).pack(side=tk.LEFT, padx=2)
         tk.Button(dir_acts, text="🔄 恢复默认", font=("Segoe UI", 8), bg="#1e293b", fg="#94a3b8", relief="flat", padx=6, pady=2, cursor="hand2", command=self._reset_backup_dir).pack(side=tk.LEFT, padx=2)
+
+        # 展项工程与数据目录选择栏 (支持将大型展项工程、多媒体素材目录一并压缩归档，彻底解决纯配置包过小问题)
+        proj_acts = tk.Frame(box, bg=self.CARD_BG, padx=10, pady=6)
+        proj_acts.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(proj_acts, text="📦 打包展项工程目录 (可选):", font=("Segoe UI", 9, "bold"), bg=self.CARD_BG, fg="#38bdf8").pack(side=tk.LEFT)
+        ent_pdir = tk.Entry(proj_acts, textvariable=self.extra_proj_dir_var, font=("Consolas", 9), bg="#0f172a", fg="#38bdf8", relief="flat")
+        ent_pdir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+
+        def _choose_proj_dir():
+            cur = self.extra_proj_dir_var.get().strip()
+            d = filedialog.askdirectory(initialdir=cur if os.path.exists(cur) else None, title="选择需要打包的展项工程或多媒体文件夹")
+            if d:
+                self.extra_proj_dir_var.set(d)
+                self.config["backup_proj_dir"] = d
+                dh.ConfigManager.save_config(self.config)
+
+        def _clear_proj_dir():
+            self.extra_proj_dir_var.set("")
+            self.config["backup_proj_dir"] = ""
+            dh.ConfigManager.save_config(self.config)
+
+        tk.Button(proj_acts, text="📁 选择目录...", font=("Segoe UI", 8, "bold"), bg="#334155", fg="#fff", relief="flat", padx=8, pady=2, cursor="hand2", command=_choose_proj_dir).pack(side=tk.LEFT, padx=2)
+        tk.Button(proj_acts, text="清空", font=("Segoe UI", 8), bg="#1e293b", fg="#94a3b8", relief="flat", padx=6, pady=2, cursor="hand2", command=_clear_proj_dir).pack(side=tk.LEFT, padx=2)
 
         top_acts = tk.Frame(box, bg=self.CARD_BG, padx=10, pady=8)
         top_acts.pack(fill=tk.X, pady=(0, 6))
@@ -1374,13 +1427,21 @@ class AgentAppUI:
 
     def _create_local_backup(self):
         b_dir = self.backup_dir_var.get().strip() or gwc_backup.get_default_backup_dir()
+        p_dir = self.extra_proj_dir_var.get().strip()
+        extra_dirs = [p_dir] if p_dir and os.path.isdir(p_dir) else None
+
         def runner():
-            res = gwc_backup.create_backup_package(name="", notes="受控端本地一键备份", output_dir=b_dir)
+            res = gwc_backup.create_backup_package(
+                name="",
+                notes="受控端本地一键备份 (含系统环境与展项工程)",
+                output_dir=b_dir,
+                extra_dirs=extra_dirs
+            )
             if res.get("success"):
                 sz_str = res.get("size_str", f"{res.get('size_mb')} MB")
                 self.root.after(0, lambda: (
                     self._refresh_local_backup_tree(),
-                    messagebox.showinfo("备份成功", f"系统配置已成功备份！\n目录: {b_dir}\n文件: {res.get('filename')}\n大小: {sz_str}")
+                    messagebox.showinfo("备份成功", f"系统配置与展项工程已成功备份！\n目录: {b_dir}\n文件: {res.get('filename')}\n大小: {sz_str}")
                 ))
             else:
                 self.root.after(0, lambda: messagebox.showerror("备份失败", res.get("error", "未知错误")))
@@ -1483,6 +1544,36 @@ class AgentAppUI:
         if not ok:
             messagebox.showerror("设置失败", msg)
             self.autostart_var.set(not enable)
+        self._update_autostart_ui(self.autostart_var.get())
+
+    def _toggle_autostart_from_top(self):
+        new_st = not self.autostart_var.get()
+        silent = self.silent_boot_var.get()
+        ok, msg = dh.AutoStartManager.set_auto_start(enable=new_st, silent=silent)
+        if ok:
+            self.autostart_var.set(new_st)
+            self.config["auto_start"] = new_st
+            dh.ConfigManager.save_config(self.config)
+            self._update_autostart_ui(new_st)
+            st_text = "已开启开机自启 (静默后台守护)" if new_st else "已关闭开机自启"
+            messagebox.showinfo("自启动设置", f"🚀 终端开机自启动状态已更新: {st_text}")
+        else:
+            messagebox.showerror("设置失败", f"无法修改开机自启动: {msg}")
+
+    def _update_autostart_ui(self, enabled: bool):
+        if hasattr(self, "btn_autostart_top") and self.btn_autostart_top.winfo_exists():
+            if enabled:
+                self.btn_autostart_top.config(
+                    text="🚀 开机自启: 已开启",
+                    bg="#059669",
+                    fg="#ffffff"
+                )
+            else:
+                self.btn_autostart_top.config(
+                    text="🚀 开机自启: 未开启",
+                    bg="#334155",
+                    fg="#94a3b8"
+                )
 
     def _on_toggle_silent_boot(self):
         silent = self.silent_boot_var.get()

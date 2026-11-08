@@ -336,6 +336,7 @@ class MasterAppUI:
         # 3. 主界面 Notebook 标签容器
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(6, 12))
+        self.nb.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         # Tab 1: 集群设备监控大厅
         self.tab_monitor = ttk.Frame(self.nb, style="Dark.TFrame")
@@ -537,9 +538,9 @@ class MasterAppUI:
         self.client_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=6)
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y, pady=6, padx=(0, 6))
 
-        # 事件绑定：单击选定展示状态，双击小屏预览
+        # 事件绑定：单击选定展示状态，双击单窗口小屏预览
         self.client_tree.bind("<<TreeviewSelect>>", self._on_client_tree_select)
-        self.client_tree.bind("<Double-1>", lambda e: self._open_remote_desktop(fullscreen=False))
+        self.client_tree.bind("<Double-1>", lambda e: self._open_remote_desktop(fullscreen=False, force_single=True))
         self.client_tree.bind("<Button-3>", self._show_client_context_menu)
 
         # 右键上下文菜单
@@ -559,8 +560,9 @@ class MasterAppUI:
 
     def _build_context_menu(self):
         self.context_menu = tk.Menu(self.root, tearoff=0, bg="#1e293b", fg="#ffffff", activebackground="#0284c7")
-        self.context_menu.add_command(label="🖥️ 小屏预览 (VNC6 / 双击)", command=lambda: self._open_remote_desktop(fullscreen=False))
-        self.context_menu.add_command(label="⛶ 全屏桌面控制", command=lambda: self._open_remote_desktop(fullscreen=True))
+        self.context_menu.add_command(label="🖥️ 小屏预览 (双击唯一窗口)", command=lambda: self._open_remote_desktop(fullscreen=False, force_single=True))
+        self.context_menu.add_command(label="📑 新建独立预览窗口 (支持多开)", command=lambda: self._open_remote_desktop(fullscreen=False, force_single=False))
+        self.context_menu.add_command(label="⛶ 全屏桌面控制", command=lambda: self._open_remote_desktop(fullscreen=True, force_single=False))
         self.context_menu.add_command(label="📁 文件管理", command=self._open_remote_file_transfer)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="✏️ 修改设备别名", command=self._edit_client_alias)
@@ -1207,6 +1209,40 @@ class MasterAppUI:
         self.master_bk_tree.pack(fill=tk.BOTH, expand=True)
 
         self._refresh_master_backup_tree()
+        self._sync_backup_devices()
+
+    def _on_notebook_tab_changed(self, event=None):
+        try:
+            sel_tab = self.nb.index("current")
+            if sel_tab == 1:  # 备份中心
+                self._sync_backup_devices()
+                self._refresh_master_backup_tree()
+            elif sel_tab == 2:  # 商业授权
+                self._refresh_client_tree()
+        except Exception:
+            pass
+
+    def _sync_backup_devices(self):
+        """立即将主控端已连接在线的全部工控机实时同步填充至备份中心下拉框"""
+        if not hasattr(self, "bk_target_combo"):
+            return
+        clients = self.master_hub.get_online_clients()
+        options = []
+        for c in clients:
+            ip = c["ip"]
+            raw_h = c.get("custom_name") or c.get("hostname", "Unknown")
+            disp_host = self._get_display_name(ip, raw_h)
+            options.append(f"{ip} - {disp_host}")
+        self.bk_target_combo["values"] = options
+        if options:
+            if not self.bk_target_combo.get() or self.bk_target_combo.get() not in options:
+                self.bk_target_combo.current(0)
+            if hasattr(self, "lbl_bk_target_tip") and self.lbl_bk_target_tip.winfo_exists():
+                self.lbl_bk_target_tip.config(text=f"✓ 已发现 {len(options)} 台在线工控机，已就绪", fg="#10b981")
+        else:
+            self.bk_target_combo.set("未发现局域网在线受控工控机")
+            if hasattr(self, "lbl_bk_target_tip") and self.lbl_bk_target_tip.winfo_exists():
+                self.lbl_bk_target_tip.config(text="⚠️ 暂未搜索到在线受控端，请确认受控程序已启动", fg="#f59e0b")
 
     def _refresh_backup_devices(self):
         """主动探测并刷新备份中心的目标工控机下拉框"""
@@ -1781,7 +1817,7 @@ class MasterAppUI:
                 return self.selected_ip
         return ""
 
-    def _open_remote_desktop(self, fullscreen: bool = False):
+    def _open_remote_desktop(self, fullscreen: bool = False, force_single: bool = True):
         ip = self._get_selected_client_ip()
         if not ip:
             messagebox.showinfo("提示", "请先在列表中选中一台工控机！")
@@ -1793,7 +1829,32 @@ class MasterAppUI:
         def send_fn(client_ip, cmd_type, payload, callback=None):
             self.master_hub.send_command(client_ip, cmd_type, payload, callback=callback)
 
-        gwc_vnc.VNC6RemoteDesktopWindow(self.root, ip, h_name, send_fn, fullscreen=fullscreen)
+        if not hasattr(self, "_active_desktop_windows"):
+            self._active_desktop_windows = {}
+
+        if force_single:
+            # 双击行为: 严格保证全局只显示一个活跃预览窗口，绝不重复弹窗堆叠
+            for old_key, old_w in list(self._active_desktop_windows.items()):
+                try:
+                    if old_w and old_w.winfo_exists():
+                        if old_key == ip:
+                            # 已经打开了该从机窗口，直接置顶唤醒！
+                            old_w.deiconify()
+                            old_w.lift()
+                            old_w.focus_force()
+                            return
+                        else:
+                            old_w.destroy()
+                except Exception:
+                    pass
+                self._active_desktop_windows.pop(old_key, None)
+
+            win = gwc_vnc.VNC6RemoteDesktopWindow(self.root, ip, h_name, send_fn, fullscreen=fullscreen)
+            self._active_desktop_windows[ip] = win
+        else:
+            # 右键菜单行为: 允许打开多个独立窗口同时监控多台设备
+            win = gwc_vnc.VNC6RemoteDesktopWindow(self.root, ip, h_name, send_fn, fullscreen=fullscreen)
+            self._active_desktop_windows[f"{ip}_{id(win)}"] = win
 
     def _open_remote_file_transfer(self):
         ip = self._get_selected_client_ip()

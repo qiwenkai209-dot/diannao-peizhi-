@@ -95,6 +95,13 @@ def collect_system_snapshot(custom_paths: list = None) -> dict:
             if os.path.exists(p):
                 snapshot["custom_files"].append(os.path.abspath(p))
 
+    # 自动包含本地展馆环境核心配置文件
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    for cfg_f in ["agent_preset_apps.json", "gwc_config.json"]:
+        cfg_p = os.path.join(base_dir, cfg_f)
+        if os.path.isfile(cfg_p) and cfg_p not in snapshot["custom_files"]:
+            snapshot["custom_files"].append(cfg_p)
+
     return snapshot
 
 
@@ -145,19 +152,23 @@ def create_backup_package(name: str = "", notes: str = "", custom_paths: list = 
             zf.writestr("startup.json", json.dumps(snapshot["startup"], ensure_ascii=False, indent=2))
             zf.writestr("software.json", json.dumps(snapshot["software"], ensure_ascii=False, indent=2))
 
-            # 写入自定义文件
+            # 写入自定义文件与展项工程数据 (附带原路径映射，支持完美还原)
+            file_map = {}
             for cp in snapshot.get("custom_files", []):
                 if os.path.isfile(cp):
-                    arc_name = os.path.join("files", os.path.basename(cp))
+                    arc_name = f"files/{os.path.basename(cp)}"
                     zf.write(cp, arc_name)
+                    file_map[arc_name] = os.path.abspath(cp)
                 elif os.path.isdir(cp):
                     base_folder = os.path.basename(cp)
                     for root, _, files in os.walk(cp):
                         for f in files:
                             full_p = os.path.join(root, f)
-                            rel_p = os.path.relpath(full_p, cp)
-                            arc_name = os.path.join("files", base_folder, rel_p)
+                            rel_p = os.path.relpath(full_p, cp).replace("\\", "/")
+                            arc_name = f"files/{base_folder}/{rel_p}"
                             zf.write(full_p, arc_name)
+                            file_map[arc_name] = os.path.abspath(full_p)
+            zf.writestr("file_map.json", json.dumps(file_map, ensure_ascii=False, indent=2))
 
         size_bytes = os.path.getsize(file_path)
         if size_bytes == 0:
@@ -309,6 +320,22 @@ def restore_backup_package(file_path: str, restore_net: bool = True, restore_pol
                         logs.append(f"   * 更多已省略 (共 {len(missing)} 个)")
                 else:
                     logs.append("✅ 预装软件环境核验通过，所有预装软件均已就绪！")
+
+            # 5. 还原展项工程数据与应用文件
+            if "file_map.json" in names:
+                file_map = json.loads(zf.read("file_map.json").decode("utf-8"))
+                logs.append(f"正在还原展项工程与应用数据文件 ({len(file_map)} 项)...")
+                restored_cnt = 0
+                for arc_name, target_path in file_map.items():
+                    if arc_name in names:
+                        try:
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                            with open(target_path, "wb") as f_out:
+                                f_out.write(zf.read(arc_name))
+                            restored_cnt += 1
+                        except Exception as e_file:
+                            logs.append(f" - 文件写回跳过 ({os.path.basename(target_path)}): {e_file}")
+                logs.append(f"✅ 展项工程与应用数据还原完成，共恢复 {restored_cnt} 个文件！")
 
         gwc_system_ops.notify_shell_refresh()
         logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 系统一键配置还原全部完成！")
