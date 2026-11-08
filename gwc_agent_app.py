@@ -342,6 +342,8 @@ class AgentAppUI:
     def _start_license_guardian(self):
         """后台运行中定期核验授权 (到期即刻锁定终端菜单)"""
         def _check_tick():
+            if not (hasattr(self, "root") and self.root.winfo_exists()):
+                return
             ok, msg = self.license_mgr.check()
             if not ok:
                 # 授权到期或失效：立即锁定终端
@@ -350,8 +352,10 @@ class AgentAppUI:
                     self._show_license_dialog(msg)
             else:
                 self._update_auth_ui_display(True)
+            if hasattr(self, "root") and self.root.winfo_exists():
+                self.root.after(3000, _check_tick)
+        if hasattr(self, "root") and self.root.winfo_exists():
             self.root.after(3000, _check_tick)
-        self.root.after(3000, _check_tick)
 
     def _update_auth_ui_display(self, is_active: bool = False):
         ok, msg = self.license_mgr.check() if self.license_mgr else (False, "未授权")
@@ -1042,8 +1046,11 @@ class AgentAppUI:
         self._schedule_marquee_update()
 
     def _schedule_marquee_update(self):
+        if not (hasattr(self, "root") and self.root.winfo_exists()):
+            return
         self._update_global_marquee_text()
-        self.root.after(3000, self._schedule_marquee_update)
+        if hasattr(self, "root") and self.root.winfo_exists():
+            self.root.after(3000, self._schedule_marquee_update)
 
     def _update_global_marquee_text(self):
         local_ip = gwc_discovery.get_local_ip()

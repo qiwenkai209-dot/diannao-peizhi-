@@ -385,7 +385,23 @@ class GwcAgentClient:
                         gwc_vnc.user32.keybd_event(0x12, 0, 2, 0)      # Alt up
                     except Exception:
                         pass
+                elif act == "win_d":
+                    # 模拟 Win+D 显示桌面
+                    try:
+                        gwc_vnc.user32.keybd_event(0x5B, 0, 0, 0)      # Win down
+                        gwc_vnc.user32.keybd_event(0x44, 0, 0, 0)      # D down
+                        time.sleep(0.02)
+                        gwc_vnc.user32.keybd_event(0x44, 0, 2, 0)      # D up
+                        gwc_vnc.user32.keybd_event(0x5B, 0, 2, 0)      # Win up
+                    except Exception:
+                        pass
+                elif act == "release_all":
+                    gwc_vnc.release_all_remote_keys()
                 return  # 输入事件不回传大响应，降低信道开销保证流畅度
+
+            elif m_type == "VNC_RELEASE_ALL_KEYS":
+                gwc_vnc.release_all_remote_keys()
+                return
 
             elif m_type == "FS_LIST":
                 res = gwc_vnc.handle_fs_list(payload.get("path", ""))

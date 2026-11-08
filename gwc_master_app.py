@@ -2385,8 +2385,11 @@ class MasterAppUI:
 
     def _periodic_ui_refresh(self):
         """定期微调与心跳检测"""
+        if not (hasattr(self, "root") and self.root.winfo_exists()):
+            return
         self._refresh_client_tree()
-        self.root.after(3000, self._periodic_ui_refresh)
+        if hasattr(self, "root") and self.root.winfo_exists():
+            self.root.after(3000, self._periodic_ui_refresh)
 
 
 def main():
