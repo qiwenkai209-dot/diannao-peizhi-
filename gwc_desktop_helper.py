@@ -163,21 +163,25 @@ class GlobalHotkeyManager:
 
 
 class AutoStartManager:
-    """自定义开机自启动管理 (注册表 HKCU Run 模式)"""
+    """
+    企业级开机自启动管理 (计划任务 highest 特权免 UAC 拦截 + 注册表 Run 双重加固)
+    展馆工控机由于需要管理员权限，普通注册表 Run 键在开机时会被 Windows UAC 静默拦截；
+    本管理器采用 Windows 计划任务以 highest 最高权限自启，确保开机 100% 自动拉起且绝无弹窗拦截。
+    """
 
+    TASK_NAME = "GWC_Exhibit_Terminal_Guardian"
     REG_KEY_NAME = "GuoWenChuang_Agent"
 
     @classmethod
     def get_executable_command(cls, silent: bool = True) -> str:
         """获取当前脚本或 EXE 的完整开机执行命令"""
         if getattr(sys, "frozen", False):
-            # 打包后的 EXE 路径
+            # 打包后的 EXE 绝对路径
             exe_path = os.path.abspath(sys.executable)
             cmd = f'"{exe_path}"'
         else:
-            # Python 脚本调试环境
+            # Python 脚本开发调试环境
             py_exe = os.path.abspath(sys.executable)
-            # 如果是 pythonw 更好（无控制台）
             pyw_exe = os.path.join(os.path.dirname(py_exe), "pythonw.exe")
             runner = pyw_exe if os.path.exists(pyw_exe) else py_exe
             script = os.path.abspath(sys.argv[0])
@@ -189,37 +193,116 @@ class AutoStartManager:
 
     @classmethod
     def is_auto_start_enabled(cls) -> bool:
-        """检查当前是否已注册开机自启"""
+        """检查当前是否已启用开机自启 (同时探测计划任务与注册表 Run 键)"""
+        # 1. 检查计划任务是否存在
+        try:
+            import subprocess
+            flags = 0x08000000 if sys.platform == "win32" else 0
+            res = subprocess.run(
+                ["schtasks", "/query", "/tn", cls.TASK_NAME],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=flags
+            )
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+        # 2. 检查注册表 HKCU Run 键
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as k:
                 val, _ = winreg.QueryValueEx(k, cls.REG_KEY_NAME)
-                return bool(val)
+                if val:
+                    return True
         except Exception:
-            return False
+            pass
+
+        # 3. 检查注册表 HKLM Run 键
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as k:
+                val, _ = winreg.QueryValueEx(k, cls.REG_KEY_NAME)
+                if val:
+                    return True
+        except Exception:
+            pass
+
+        return False
 
     @classmethod
     def set_auto_start(cls, enable: bool, silent: bool = True) -> tuple:
         """
-        开启或关闭开机自启
+        开启或关闭开机自启 (计划任务 highest 免 UAC + 注册表双加固)
         :param enable: True 为开启，False 为关闭
         :param silent: True 为静默隐藏启动 (--hide)
         :return: (ok: bool, msg: str)
         """
+        import subprocess
+        flags = 0x08000000 if sys.platform == "win32" else 0
+        cmd = cls.get_executable_command(silent=silent)
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as k:
-                if enable:
-                    cmd = cls.get_executable_command(silent=silent)
+
+        if enable:
+            success_methods = []
+            # 1. 优先创建 Windows 计划任务 (最高管理员特权，开机登录即自启，绝无 UAC 拦截)
+            try:
+                # schtasks /create /tn "..." /tr "..." /sc onlogon /rl highest /f
+                res = subprocess.run(
+                    ["schtasks", "/create", "/tn", cls.TASK_NAME, "/tr", cmd, "/sc", "onlogon", "/rl", "highest", "/f"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=flags
+                )
+                if res.returncode == 0:
+                    success_methods.append("系统计划任务(最高管理员特权)")
+            except Exception:
+                pass
+
+            # 2. 辅助加固: 写入 HKCU 注册表 Run 键
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as k:
                     winreg.SetValueEx(k, cls.REG_KEY_NAME, 0, winreg.REG_SZ, cmd)
-                    return True, f"已启用开机自启: {cmd}"
-                else:
-                    try:
-                        winreg.DeleteValue(k, cls.REG_KEY_NAME)
-                    except FileNotFoundError:
-                        pass
-                    return True, "已成功取消开机自启"
-        except Exception as e:
-            return False, f"配置开机自启失败: {e}"
+                    success_methods.append("用户注册表Run")
+            except Exception:
+                pass
+
+            # 3. 辅助加固: 尝试写入 HKLM 注册表 Run 键
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.SetValueEx(k, cls.REG_KEY_NAME, 0, winreg.REG_SZ, cmd)
+                    success_methods.append("全机注册表Run")
+            except Exception:
+                pass
+
+            if success_methods:
+                return True, f"开机自启配置成功 [{', '.join(success_methods)}]:\n{cmd}"
+            else:
+                return False, "未能写入计划任务或注册表，请以管理员身份运行本程序重试！"
+        else:
+            # 彻底取消自启
+            # 1. 删除计划任务
+            try:
+                subprocess.run(
+                    ["schtasks", "/delete", "/tn", cls.TASK_NAME, "/f"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=flags
+                )
+            except Exception:
+                pass
+
+            # 2. 删除 HKCU 注册表
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, cls.REG_KEY_NAME)
+            except Exception:
+                pass
+
+            # 3. 删除 HKLM 注册表
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, cls.REG_KEY_NAME)
+            except Exception:
+                pass
+
+            return True, "已成功取消受控端开机自启"
 
 
 class ConfigManager:

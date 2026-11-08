@@ -33,15 +33,13 @@ BACKUP_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "GWC
 
 
 def get_default_backup_dir() -> str:
-    """获取默认备份文件存储目录"""
-    if not os.path.exists(BACKUP_DIR):
-        try:
-            os.makedirs(BACKUP_DIR, exist_ok=True)
-        except Exception:
-            local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
-            os.makedirs(local_dir, exist_ok=True)
-            return local_dir
-    return BACKUP_DIR
+    """获取默认备份文件存储目录 (自动在程序目录下生成专属 GWC_Backups 文件夹，集中归档不乱放)"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    target_dir = os.path.join(base_dir, "GWC_Backups")
+    os.makedirs(target_dir, exist_ok=True)
+    return target_dir
 
 
 def collect_system_snapshot(custom_paths: list = None) -> dict:

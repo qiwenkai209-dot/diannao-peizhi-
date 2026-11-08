@@ -1089,29 +1089,29 @@ class MasterAppUI:
             ))
         threading.Thread(target=runner, daemon=True).start()
 
-    # ==================== Tab 2: 备份中心与远程下发 ====================
+    # ==================== Tab 2: 备份中心与远程下发 (在线主机列表 + 归档库) ====================
     def _build_backup_center(self, parent):
         f = tk.Frame(parent, bg=self.BG_MAIN)
-        f.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        f.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
 
-        # 1. 目标受控工控机发现与指定工具条
-        dev_bar = tk.Frame(f, bg=self.BG_PANEL, padx=10, pady=8)
-        dev_bar.pack(fill=tk.X, pady=(0, 6))
+        # 顶部目标设备状态与快速发现工具条
+        top_bar = tk.Frame(f, bg=self.BG_PANEL, padx=12, pady=7)
+        top_bar.pack(fill=tk.X, pady=(0, 6))
 
-        tk.Label(
-            dev_bar,
-            text="🎯 目标受控工控机:",
+        self.selected_backup_host_ip = ""
+
+        self.lbl_bk_target_tip = tk.Label(
+            top_bar,
+            text="🎯 当前选定备份主机: [请在下方主机列表点击选择目标工控机]",
             font=("Segoe UI", 9, "bold"),
-            fg=self.ACCENT_CYAN,
-            bg=self.BG_PANEL
-        ).pack(side=tk.LEFT, padx=(2, 6))
-
-        self.bk_target_combo = ttk.Combobox(dev_bar, state="readonly", font=("Segoe UI", 9), width=38)
-        self.bk_target_combo.pack(side=tk.LEFT, padx=4)
+            bg=self.BG_PANEL,
+            fg=self.ACCENT_CYAN
+        )
+        self.lbl_bk_target_tip.pack(side=tk.LEFT)
 
         btn_bk_scan = tk.Button(
-            dev_bar,
-            text="🔍 发现/刷新在线设备",
+            top_bar,
+            text="🔍 扫描/刷新局域网在线设备",
             font=("Segoe UI", 8, "bold"),
             bg="#1e293b",
             fg=self.ACCENT_CYAN,
@@ -1121,161 +1121,226 @@ class MasterAppUI:
             cursor="hand2",
             command=self._refresh_backup_devices
         )
-        btn_bk_scan.pack(side=tk.LEFT, padx=6)
+        btn_bk_scan.pack(side=tk.RIGHT, padx=2)
 
-        self.lbl_bk_target_tip = tk.Label(
-            dev_bar,
-            text="主控支持直接发现局域网受控设备并下发还原，无需切回监控大厅",
-            font=("Segoe UI", 8),
-            bg=self.BG_PANEL,
-            fg=self.TEXT_MUTED
-        )
-        self.lbl_bk_target_tip.pack(side=tk.LEFT, padx=8)
+        # 左右双栏工作台布局 (左: 在线主机列表选定备份 | 右: 历史备份归档库下发与管理)
+        paned = tk.PanedWindow(f, orient=tk.HORIZONTAL, bg=self.BG_MAIN, bd=0, sashwidth=6)
+        paned.pack(fill=tk.BOTH, expand=True)
 
-        # 2. 备份与还原操作栏
-        top_acts = tk.Frame(f, bg=self.BG_PANEL, padx=10, pady=8)
-        top_acts.pack(fill=tk.X, pady=(0, 8))
-
-        btn_push_bk = tk.Button(
-            top_acts,
-            text="📤 下发选中备份到目标工控机并自动还原",
+        # ================= 左分栏: 局域网在线主机列表 =================
+        left_box = tk.LabelFrame(
+            paned,
+            text=" 🖥️ 局域网在线受控主机 (点击选择备份目标) ",
             font=("Segoe UI", 9, "bold"),
-            bg=self.ACCENT_BLUE,
-            fg="#ffffff",
-            relief="flat",
-            padx=12,
-            pady=5,
-            cursor="hand2",
-            command=self._master_push_backup
+            fg=self.ACCENT_CYAN,
+            bg=self.BG_PANEL,
+            bd=1,
+            padx=8,
+            pady=6
         )
-        btn_push_bk.pack(side=tk.LEFT, padx=4)
+        paned.add(left_box, width=420)
+
+        l_bar = tk.Frame(left_box, bg=self.BG_PANEL)
+        l_bar.pack(fill=tk.X, pady=(0, 6))
 
         btn_req_bk = tk.Button(
-            top_acts,
-            text="📥 命令目标从机立即生成配置备份并上传",
-            font=("Segoe UI", 9, "bold"),
+            l_bar,
+            text="📥 立即备份选中主机并上传",
+            font=("Segoe UI", 8, "bold"),
             bg="#059669",
             fg="#ffffff",
             relief="flat",
-            padx=12,
-            pady=5,
+            padx=10,
+            pady=3,
             cursor="hand2",
             command=self._master_request_backup
         )
-        btn_req_bk.pack(side=tk.LEFT, padx=4)
+        btn_req_bk.pack(side=tk.LEFT, padx=(0, 4))
 
-        btn_refresh_bk_list = tk.Button(
-            top_acts,
-            text="🔄 刷新备份库",
-            font=("Segoe UI", 9),
+        tk.Button(
+            l_bar,
+            text="🔄 刷新列表",
+            font=("Segoe UI", 8),
             bg="#1e293b",
             fg="#ffffff",
             relief="flat",
-            padx=10,
-            pady=5,
+            padx=8,
+            pady=3,
             cursor="hand2",
-            command=self._refresh_master_backup_tree
+            command=self._sync_backup_devices
         )
-        btn_refresh_bk_list.pack(side=tk.LEFT, padx=4)
+        btn_req_bk.pack(side=tk.LEFT, padx=(0, 4))
 
-        btn_open_folder = tk.Button(
-            top_acts,
-            text="📂 打开主控备份归档文件夹",
-            font=("Segoe UI", 9),
-            bg="#334155",
+        tk.Label(
+            l_bar,
+            text="双击主机也可快速发起备份",
+            font=("Segoe UI", 8),
+            bg=self.BG_PANEL,
+            fg=self.TEXT_MUTED
+        ).pack(side=tk.RIGHT)
+
+        # 在线主机列表表格
+        cols_h = ("ip", "status")
+        self.bk_online_hosts_tree = ttk.Treeview(left_box, columns=cols_h, show="tree headings", selectmode="browse")
+        self.bk_online_hosts_tree.heading("#0", text="工控机名称 / 别名", anchor="w")
+        self.bk_online_hosts_tree.heading("ip", text="IP 地址", anchor="w")
+        self.bk_online_hosts_tree.heading("status", text="在线状态", anchor="center")
+
+        self.bk_online_hosts_tree.column("#0", width=170)
+        self.bk_online_hosts_tree.column("ip", width=130)
+        self.bk_online_hosts_tree.column("status", width=90, anchor="center")
+        self.bk_online_hosts_tree.pack(fill=tk.BOTH, expand=True)
+
+        self.bk_online_hosts_tree.bind("<<TreeviewSelect>>", self._on_backup_host_selected)
+        self.bk_online_hosts_tree.bind("<Double-1>", lambda e: self._master_request_backup())
+
+        # ================= 右分栏: 备份归档历史库与下发 =================
+        right_box = tk.LabelFrame(
+            paned,
+            text=" 💾 主控备份历史归档库 (统一存储于 GWC_Master_Backups) ",
+            font=("Segoe UI", 9, "bold"),
+            fg=self.ACCENT_GREEN,
+            bg=self.BG_PANEL,
+            bd=1,
+            padx=8,
+            pady=6
+        )
+        paned.add(right_box, width=640)
+
+        r_bar = tk.Frame(right_box, bg=self.BG_PANEL)
+        r_bar.pack(fill=tk.X, pady=(0, 6))
+
+        btn_push_bk = tk.Button(
+            r_bar,
+            text="📤 下发选中备份至目标主机并自动还原",
+            font=("Segoe UI", 8, "bold"),
+            bg=self.ACCENT_BLUE,
             fg="#ffffff",
             relief="flat",
             padx=10,
-            pady=5,
+            pady=3,
+            cursor="hand2",
+            command=self._master_push_backup
+        )
+        btn_push_bk.pack(side=tk.LEFT, padx=(0, 4))
+
+        tk.Button(
+            r_bar,
+            text="🔄 刷新备份库",
+            font=("Segoe UI", 8),
+            bg="#1e293b",
+            fg="#ffffff",
+            relief="flat",
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            command=self._refresh_master_backup_tree
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        tk.Button(
+            r_bar,
+            text="📂 打开归档文件夹",
+            font=("Segoe UI", 8),
+            bg="#334155",
+            fg="#ffffff",
+            relief="flat",
+            padx=8,
+            pady=3,
             cursor="hand2",
             command=lambda: os.system(f'explorer "{self.master_hub.backup_store_dir}"')
-        )
-        btn_open_folder.pack(side=tk.RIGHT, padx=4)
+        ).pack(side=tk.RIGHT)
 
         # 备份列表表格
-        cols = ("host", "time", "size", "notes")
-        self.master_bk_tree = ttk.Treeview(f, columns=cols, show="tree headings", selectmode="browse")
-        self.master_bk_tree.heading("#0", text="备份包名称 (.gwcbackup)", anchor="w")
+        cols_b = ("host", "time", "size", "notes")
+        self.master_bk_tree = ttk.Treeview(right_box, columns=cols_b, show="tree headings", selectmode="browse")
+        self.master_bk_tree.heading("#0", text="备份包文件 (.gwcbackup)", anchor="w")
         self.master_bk_tree.heading("host", text="来源主机", anchor="center")
         self.master_bk_tree.heading("time", text="归档时间", anchor="center")
         self.master_bk_tree.heading("size", text="大小", anchor="e")
         self.master_bk_tree.heading("notes", text="备份说明", anchor="w")
 
-        self.master_bk_tree.column("#0", width=280)
-        self.master_bk_tree.column("host", width=120)
-        self.master_bk_tree.column("time", width=140)
-        self.master_bk_tree.column("size", width=80)
-        self.master_bk_tree.column("notes", width=260)
+        self.master_bk_tree.column("#0", width=240)
+        self.master_bk_tree.column("host", width=110)
+        self.master_bk_tree.column("time", width=130)
+        self.master_bk_tree.column("size", width=75)
+        self.master_bk_tree.column("notes", width=220)
         self.master_bk_tree.pack(fill=tk.BOTH, expand=True)
 
         self._refresh_master_backup_tree()
         self._sync_backup_devices()
 
-    def _on_notebook_tab_changed(self, event=None):
-        try:
-            sel_tab = self.nb.index("current")
-            if sel_tab == 1:  # 备份中心
-                self._sync_backup_devices()
-                self._refresh_master_backup_tree()
-            elif sel_tab == 2:  # 商业授权
-                self._refresh_client_tree()
-        except Exception:
-            pass
+    def _on_backup_host_selected(self, event=None):
+        """当用户在左侧列表中点击选择某台工控机时"""
+        if not hasattr(self, "bk_online_hosts_tree"):
+            return
+        sel = self.bk_online_hosts_tree.selection()
+        if not sel:
+            return
+        ip = sel[0]
+        self.selected_backup_host_ip = ip
+        item = self.bk_online_hosts_tree.item(ip)
+        h_name = item.get("text", ip)
+        if hasattr(self, "lbl_bk_target_tip") and self.lbl_bk_target_tip.winfo_exists():
+            self.lbl_bk_target_tip.config(
+                text=f"🎯 当前选定备份主机: 【{h_name}】 ({ip})  [已就绪]",
+                fg="#10b981"
+            )
 
     def _sync_backup_devices(self):
-        """立即将主控端已连接在线的全部工控机实时同步填充至备份中心下拉框"""
-        if not hasattr(self, "bk_target_combo"):
+        """立即将主控端已连接在线的全部工控机实时同步填充至左侧主机列表"""
+        if not hasattr(self, "bk_online_hosts_tree"):
             return
+        for i in self.bk_online_hosts_tree.get_children():
+            self.bk_online_hosts_tree.delete(i)
+
         clients = self.master_hub.get_online_clients()
-        options = []
+        first_ip = None
         for c in clients:
             ip = c["ip"]
+            if not first_ip:
+                first_ip = ip
             raw_h = c.get("custom_name") or c.get("hostname", "Unknown")
             disp_host = self._get_display_name(ip, raw_h)
-            options.append(f"{ip} - {disp_host}")
-        self.bk_target_combo["values"] = options
-        if options:
-            if not self.bk_target_combo.get() or self.bk_target_combo.get() not in options:
-                self.bk_target_combo.current(0)
-            if hasattr(self, "lbl_bk_target_tip") and self.lbl_bk_target_tip.winfo_exists():
-                self.lbl_bk_target_tip.config(text=f"✓ 已发现 {len(options)} 台在线工控机，已就绪", fg="#10b981")
+            self.bk_online_hosts_tree.insert(
+                "", "end",
+                iid=ip,
+                text=disp_host,
+                values=(ip, "● 在线就绪")
+            )
+
+        if clients:
+            target_sel = self.selected_backup_host_ip if (self.selected_backup_host_ip and self.bk_online_hosts_tree.exists(self.selected_backup_host_ip)) else first_ip
+            if target_sel and self.bk_online_hosts_tree.exists(target_sel):
+                self.bk_online_hosts_tree.selection_set(target_sel)
+                self.bk_online_hosts_tree.focus(target_sel)
+                self._on_backup_host_selected()
         else:
-            self.bk_target_combo.set("未发现局域网在线受控工控机")
             if hasattr(self, "lbl_bk_target_tip") and self.lbl_bk_target_tip.winfo_exists():
-                self.lbl_bk_target_tip.config(text="⚠️ 暂未搜索到在线受控端，请确认受控程序已启动", fg="#f59e0b")
+                self.lbl_bk_target_tip.config(text="⚠️ 暂未搜索到在线受控端，请确认工控机受控程序已启动", fg="#f59e0b")
 
     def _refresh_backup_devices(self):
-        """主动探测并刷新备份中心的目标工控机下拉框"""
-        self.lbl_bk_target_tip.config(text="正在全网段探测在线受控设备...", fg="#38bdf8")
+        """主动全网段扫描并刷新备份中心的在线受控主机列表"""
+        if hasattr(self, "lbl_bk_target_tip"):
+            self.lbl_bk_target_tip.config(text="正在全网段探测在线受控设备...", fg="#38bdf8")
         def runner():
-            res = self.master_hub.scan_online_agents(timeout=1.5, auto_connect=True)
-            def done():
-                clients = self.master_hub.get_online_clients()
-                options = []
-                for c in clients:
-                    ip = c["ip"]
-                    raw_h = c.get("custom_name") or c.get("hostname", "Unknown")
-                    disp_host = self._get_display_name(ip, raw_h)
-                    options.append(f"{ip} - {disp_host}")
-                self.bk_target_combo["values"] = options
-                if options:
-                    if not self.bk_target_combo.get() or self.bk_target_combo.get() not in options:
-                        self.bk_target_combo.current(0)
-                    self.lbl_bk_target_tip.config(text=f"✓ 已发现 {len(options)} 台在线工控机，已更新就绪", fg="#10b981")
-                else:
-                    self.bk_target_combo.set("未发现局域网在线受控工控机")
-                    self.lbl_bk_target_tip.config(text="⚠️ 暂未搜索到在线受控端，请确认受控程序已启动", fg="#f59e0b")
-            self._safe_after(done)
+            self.master_hub.scan_online_agents(timeout=1.5, auto_connect=True)
+            self._safe_after(self._sync_backup_devices)
         threading.Thread(target=runner, daemon=True).start()
 
     def _get_backup_target_ip(self) -> str:
-        """从备份中心下拉框或选定状态中智能获取目标工控机 IP"""
-        val = self.bk_target_combo.get().strip() if hasattr(self, "bk_target_combo") else ""
-        if val and " - " in val:
-            ip = val.split(" - ")[0].strip()
-            if ip and ip != "未发现局域网在线受控工控机":
-                return ip
-        # 回退
+        """从左侧在线主机列表或选定状态中智能获取目标工控机 IP"""
+        if hasattr(self, "bk_online_hosts_tree"):
+            sel = self.bk_online_hosts_tree.selection()
+            if sel:
+                return sel[0]
+        if getattr(self, "selected_backup_host_ip", None):
+            return self.selected_backup_host_ip
+        if getattr(self, "selected_ip", None):
+            return self.selected_ip
+        clients = self.master_hub.get_online_clients()
+        if clients:
+            return clients[0]["ip"]
+        return ""
         if self.selected_ip:
             return self.selected_ip
         clients = self.master_hub.get_online_clients()

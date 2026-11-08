@@ -61,10 +61,12 @@ class GwcMasterHub:
         self.on_status_updated = None
         self.on_backup_saved = None
 
-        # 主控备份归档根目录
+        # 主控备份归档根目录 (自动生成独立专属文件夹 GWC_Master_Backups，规范收纳不乱放)
         if not backup_store_dir:
             base_d = os.path.dirname(os.path.abspath(__file__))
-            self.backup_store_dir = os.path.join(base_d, "master_backups")
+            if getattr(sys, "frozen", False):
+                base_d = os.path.dirname(os.path.abspath(sys.executable))
+            self.backup_store_dir = os.path.join(base_d, "GWC_Master_Backups")
         else:
             self.backup_store_dir = backup_store_dir
         os.makedirs(self.backup_store_dir, exist_ok=True)
