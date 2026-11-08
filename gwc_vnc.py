@@ -390,6 +390,133 @@ class StandaloneRfbVncServer:
                 pass
 
 
+# ==================== 原生 HTTP MJPEG 实时视频推流服务端 (5901 端口) ====================
+class HttpMjpegStreamServer:
+    """
+    轻量级原生 HTTP MJPEG 实时视频推流服务器 (监听 5901 端口)
+    支持任意浏览器、iPad中控屏、VLC、OBS、中控网页直接拉流监看，无需安装客户端
+    流地址: http://<IP>:5901/stream.mjpg
+    单帧快照: http://<IP>:5901/shot.jpg
+    网页监看: http://<IP>:5901/
+    """
+    def __init__(self, port: int = 5901):
+        self.port = port
+        self.running = False
+        self.server_sock = None
+        self._thread = None
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._run_server, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.server_sock:
+            try:
+                self.server_sock.close()
+            except Exception:
+                pass
+
+    def _run_server(self):
+        try:
+            self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_sock.bind(("0.0.0.0", self.port))
+            self.server_sock.listen(10)
+            self.server_sock.settimeout(1.0)
+            print(f"[*] 展馆 HTTP MJPEG 视频推流服务已就绪: 端口 {self.port}")
+
+            while self.running:
+                try:
+                    conn, addr = self.server_sock.accept()
+                    threading.Thread(target=self._handle_http_client, args=(conn, addr), daemon=True).start()
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+        except Exception as e:
+            print(f"[-] HTTP MJPEG 推流监听异常: {e}")
+
+    def _handle_http_client(self, conn, addr):
+        try:
+            conn.settimeout(3.0)
+            req_data = conn.recv(2048).decode("ascii", errors="ignore")
+            if not req_data:
+                conn.close()
+                return
+
+            first_line = req_data.split("\r\n")[0]
+            parts = first_line.split()
+            if len(parts) < 2:
+                conn.close()
+                return
+            path = parts[1]
+
+            if path.startswith("/stream.mjpg") or path.startswith("/live"):
+                header = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Connection: close\r\n"
+                    "Server: GWC-ScreenStream/2.0\r\n"
+                    "Cache-Control: no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0\r\n"
+                    "Pragma: no-cache\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n\r\n"
+                )
+                conn.sendall(header.encode("ascii"))
+                conn.settimeout(None)
+
+                while self.running:
+                    jpg_bytes, _, _ = capture_desktop_image(quality=60, scale=0.8)
+                    if not jpg_bytes:
+                        time.sleep(0.05)
+                        continue
+                    frame_header = (
+                        "----frame\r\n"
+                        "Content-Type: image/jpeg\r\n"
+                        f"Content-Length: {len(jpg_bytes)}\r\n\r\n"
+                    ).encode("ascii")
+                    conn.sendall(frame_header + jpg_bytes + b"\r\n")
+                    time.sleep(0.04)
+            elif path.startswith("/shot.jpg"):
+                jpg_bytes, _, _ = capture_desktop_image(quality=75, scale=1.0)
+                resp = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: image/jpeg\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    f"Content-Length: {len(jpg_bytes)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii") + jpg_bytes
+                conn.sendall(resp)
+            else:
+                html = (
+                    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    "<title>展馆工控机桌面实时监看</title>"
+                    "<style>body{margin:0;background:#0b0f19;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;color:#38bdf8;font-family:sans-serif}img{max-width:96vw;max-height:85vh;border:1px solid #1e293b;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,0.6)}</style>"
+                    "</head><body>"
+                    "<h3>🖥️ 展馆智能工控机实时视讯推流 (MJPEG 极速通道)</h3>"
+                    "<img src='/stream.mjpg' alt='实时视讯流' />"
+                    "<p style='color:#94a3b8;font-size:13px'>推流地址: <code>/stream.mjpg</code> | 单帧快照: <code>/shot.jpg</code> | 键鼠反控请使用 VNC6 端口 5900</p>"
+                    "</body></html>"
+                ).encode("utf-8")
+                resp = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(html)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii") + html
+                conn.sendall(resp)
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 # ==================== 主控端嵌入式远程控制桌面视窗 (VNC6 架构 / 小屏预览 / 全屏) ====================
 class VNC6RemoteDesktopWindow(tk.Toplevel):
     """主控端 VNC6 架构工业级远程桌面视窗 (支持内置极速视讯回传 + 外部 RealVNC 6/TightVNC 一键联通)"""

@@ -49,6 +49,7 @@ class GwcAgentClient:
         self.sock = None
         self._work_thread = None
         self._vnc_server = None
+        self._mjpeg_server = None
         self._discovery_server = None
         self.auto_discovery = True
         self.on_status_change = None  # 回调通知 UI
@@ -76,6 +77,11 @@ class GwcAgentClient:
             try:
                 self._vnc_server = gwc_vnc.StandaloneRfbVncServer(port=5900)
                 self._vnc_server.start()
+            except Exception:
+                pass
+            try:
+                self._mjpeg_server = gwc_vnc.HttpMjpegStreamServer(port=5901)
+                self._mjpeg_server.start()
             except Exception:
                 pass
 
@@ -107,6 +113,12 @@ class GwcAgentClient:
                 pass
         if self._vnc_server:
             self._vnc_server.stop()
+        if self._mjpeg_server:
+            try:
+                self._mjpeg_server.stop()
+            except Exception:
+                pass
+            self._mjpeg_server = None
         if self.on_status_change:
             self.on_status_change(False, "服务已停止")
 

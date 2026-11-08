@@ -699,7 +699,7 @@ class AgentAppUI:
         r_port_tag.pack(fill=tk.X, pady=(4, 3))
         tk.Label(
             r_port_tag,
-            text="📌 服务端端口:  TCP: 9888  |  UDP: 9887  |  VNC/WebRTC: 5900",
+            text="📌 服务端端口:  TCP: 9888 (中控)  |  VNC: 5900 (远控)  |  HTTP推流: 5901  |  UDP: 9887 (广播)",
             font=("Segoe UI", 8, "bold"),
             bg="#0f172a",
             fg="#38bdf8"
