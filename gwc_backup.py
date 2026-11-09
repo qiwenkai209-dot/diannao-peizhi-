@@ -23,23 +23,95 @@ import zipfile
 import platform
 import socket
 import hashlib
+import shutil
+import ctypes
 import winreg
 from datetime import datetime
 
 import gwc_system_ops
 import gwc_crypto
 
-BACKUP_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "GWC_Backups")
 
-
-def get_default_backup_dir() -> str:
-    """获取默认备份文件存储目录 (自动在程序目录下生成专属 GWC_Backups 文件夹，集中归档不乱放)"""
+def get_terminal_data_dir() -> str:
+    """获取受控端专属统一数据文件夹 GWC_Terminal_Data (软件生成的唯一顶级文件夹，规范归档所有生成文件，绝不乱放)"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if getattr(sys, "frozen", False):
         base_dir = os.path.dirname(os.path.abspath(sys.executable))
-    target_dir = os.path.join(base_dir, "GWC_Backups")
-    os.makedirs(target_dir, exist_ok=True)
-    return target_dir
+    d = os.path.join(base_dir, "GWC_Terminal_Data")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_default_backup_dir() -> str:
+    """获取默认系统镜像文件存储目录 (归档于 GWC_Terminal_Data/Backups 专属子文件夹)"""
+    d = os.path.join(get_terminal_data_dir(), "Backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_default_temp_dir() -> str:
+    """获取临时还原与过程数据目录 (归档于 GWC_Terminal_Data/Temp)"""
+    d = os.path.join(get_terminal_data_dir(), "Temp")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_disk_free_space(path: str) -> int:
+    """获取指定路径所在磁盘的剩余可用空间字节数"""
+    try:
+        total, used, free = shutil.disk_usage(path)
+        return free
+    except Exception:
+        try:
+            free_bytes = ctypes.c_ulonglong(0)
+            ctypes.windll.kernel32.GetDiskFreeSpaceExW(ctypes.c_wchar_p(path), ctypes.byref(free_bytes), None, None)
+            return free_bytes.value
+        except Exception:
+            return 10 * 1024 * 1024 * 1024  # 默认兜底 10GB
+
+
+def estimate_system_image_size(extra_dirs: list = None, output_dir: str = None) -> dict:
+    """
+    扫描并预估即将生成的系统镜像大小与磁盘空间预检
+    :return: dict 包含 raw_bytes, file_count, est_compressed_bytes, free_bytes, is_space_tight 等
+    """
+    file_count = 6
+    raw_bytes = 1024 * 1024 * 2  # 基础系统环境快照约 2MB
+
+    if extra_dirs:
+        for p in extra_dirs:
+            if not p:
+                continue
+            if os.path.isfile(p):
+                file_count += 1
+                try: raw_bytes += os.path.getsize(p)
+                except Exception: pass
+            elif os.path.isdir(p):
+                for root, _, files in os.walk(p):
+                    for f in files:
+                        file_count += 1
+                        try: raw_bytes += os.path.getsize(os.path.join(root, f))
+                        except Exception: pass
+
+    # 预估压缩后的镜像大小 (按 75% 预估，考虑多媒体和文本混合)
+    est_comp_bytes = max(1024 * 100, int(raw_bytes * 0.75))
+    out_d = output_dir or get_default_backup_dir()
+    free_bytes = get_disk_free_space(out_d)
+
+    # 剩余空间紧张警告判定: 剩余可用空间不足预估压缩镜像的 1.25 倍
+    is_space_tight = bool(est_comp_bytes * 1.25 > free_bytes)
+
+    return {
+        "file_count": file_count,
+        "raw_bytes": raw_bytes,
+        "raw_str": format_file_size(raw_bytes),
+        "est_compressed_bytes": est_comp_bytes,
+        "est_str": format_file_size(est_comp_bytes),
+        "free_bytes": free_bytes,
+        "free_str": format_file_size(free_bytes),
+        "is_space_tight": is_space_tight,
+        "output_dir": out_d
+    }
 
 
 def collect_system_snapshot(custom_paths: list = None) -> dict:
@@ -93,10 +165,19 @@ def collect_system_snapshot(custom_paths: list = None) -> dict:
             if os.path.exists(p):
                 snapshot["custom_files"].append(os.path.abspath(p))
 
-    # 自动包含本地展馆环境核心配置文件
+    # 自动包含本地展馆环境核心配置文件 (兼容专属配置目录及旧文件)
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    for cfg_f in ["agent_preset_apps.json", "gwc_config.json"]:
-        cfg_p = os.path.join(base_dir, cfg_f)
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+
+    cfg_targets = [
+        os.path.join(base_dir, "GWC_Terminal_Data", "Configs", "agent_config.json"),
+        os.path.join(base_dir, "GWC_Terminal_Data", "Configs", "agent_preset_apps.json"),
+        os.path.join(base_dir, "agent_config.json"),
+        os.path.join(base_dir, "agent_preset_apps.json"),
+        os.path.join(base_dir, "gwc_config.json"),
+    ]
+    for cfg_p in cfg_targets:
         if os.path.isfile(cfg_p) and cfg_p not in snapshot["custom_files"]:
             snapshot["custom_files"].append(cfg_p)
 
@@ -115,26 +196,37 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 
-def create_backup_package(name: str = "", notes: str = "", custom_paths: list = None, output_dir: str = None) -> dict:
+def create_backup_package(name: str = "", notes: str = "", custom_paths: list = None, output_dir: str = None, extra_dirs: list = None) -> dict:
     """
-    执行一键系统配置备份并打包为 .gwcbackup 文件
+    执行一键系统配置与展项工程完整备份，生成标注系统镜像文件 (.gwcsysimg / .gwcbackup)
     """
     if not output_dir:
         output_dir = get_default_backup_dir()
     os.makedirs(output_dir, exist_ok=True)
 
+    # 兼容 custom_paths 与 extra_dirs
+    merged_paths = []
+    if custom_paths:
+        merged_paths.extend(custom_paths)
+    if extra_dirs:
+        merged_paths.extend(extra_dirs)
+
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_name = re.sub(r'[\\/*?:"<>| ]', "_", name.strip()) if name.strip() else f"Backup_{platform.node()}_{timestamp_str}"
-    filename = f"{safe_name}.gwcbackup"
+    clean_host = re.sub(r'[\\/*?:"<>| ]', "_", platform.node())
+    safe_name = re.sub(r'[\\/*?:"<>| ]', "_", name.strip()) if name.strip() else f"系统镜像_{clean_host}_{timestamp_str}"
+    filename = f"{safe_name}.gwcsysimg"
     file_path = os.path.join(output_dir, filename)
 
     try:
-        snapshot = collect_system_snapshot(custom_paths)
+        snapshot = collect_system_snapshot(merged_paths)
         manifest = {
-            "format_version": "1.0",
+            "format_version": "2.0",
+            "package_type": "SYSTEM_IMAGE",
+            "package_label": "展馆工控系统完整镜像文件",
             "name": safe_name,
             "notes": notes,
             "hostname": snapshot["hostname"],
+            "source_host": snapshot["hostname"],
             "os": snapshot["os"],
             "created_at": snapshot["created_at"],
             "timestamp": snapshot["timestamp"],
@@ -220,7 +312,10 @@ def inspect_backup_package(file_path: str) -> dict:
                 "path": file_path,
                 "size_bytes": size_bytes,
                 "size_str": sz_str,
-                "size_mb": sz_mb
+                "size_mb": sz_mb,
+                "package_type": manifest.get("package_type", "SYSTEM_IMAGE"),
+                "source_host": manifest.get("source_host", manifest.get("hostname", "")),
+                "package_label": manifest.get("package_label", "展馆工控系统镜像文件")
             }
     except Exception as e:
         return {"valid": False, "error": f"解析备份包失败: {e}"}
@@ -344,7 +439,7 @@ def restore_backup_package(file_path: str, restore_net: bool = True, restore_pol
 
 
 def list_local_backups(backup_dir: str = None) -> list:
-    """列出指定目录下的所有 .gwcbackup 文件列表"""
+    """列出指定目录下的所有系统镜像与备份文件列表 (.gwcsysimg / .gwcbackup)"""
     if not backup_dir:
         backup_dir = get_default_backup_dir()
     backups = []
@@ -352,7 +447,8 @@ def list_local_backups(backup_dir: str = None) -> list:
         return backups
 
     for f in os.listdir(backup_dir):
-        if f.lower().endswith(".gwcbackup"):
+        f_lower = f.lower()
+        if f_lower.endswith(".gwcsysimg") or f_lower.endswith(".gwcbackup"):
             fp = os.path.join(backup_dir, f)
             info = inspect_backup_package(fp)
             if info.get("valid"):
@@ -361,6 +457,9 @@ def list_local_backups(backup_dir: str = None) -> list:
                     "path": fp,
                     "name": info["manifest"].get("name", f),
                     "hostname": info["manifest"].get("hostname", ""),
+                    "source_host": info.get("source_host", info["manifest"].get("hostname", "")),
+                    "package_type": info.get("package_type", "SYSTEM_IMAGE"),
+                    "package_label": info.get("package_label", "展馆工控系统镜像文件"),
                     "created_at": info["manifest"].get("created_at", ""),
                     "notes": info["manifest"].get("notes", ""),
                     "size_mb": info["size_mb"],

@@ -23,6 +23,7 @@ import threading
 import json
 import base64
 import uuid
+import shutil
 from datetime import datetime
 
 import gwc_crypto
@@ -33,6 +34,30 @@ try:
     import universal_license_core
 except ImportError:
     universal_license_core = None
+
+
+def get_master_data_dir() -> str:
+    """获取主控端专属顶级数据文件夹 GWC_Master_Data (规范归档所有生成文件，绝不乱放)"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    d = os.path.join(base_dir, "GWC_Master_Data")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_master_backup_dir() -> str:
+    """获取主控端系统镜像与备份存储目录 (归档于 GWC_Master_Data/Backups)"""
+    d = os.path.join(get_master_data_dir(), "Backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_master_config_dir() -> str:
+    """获取主控端配置目录 (归档于 GWC_Master_Data/Configs)"""
+    d = os.path.join(get_master_data_dir(), "Configs")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 MASTER_DEFAULT_PORT = 9888
 
@@ -61,15 +86,34 @@ class GwcMasterHub:
         self.on_status_updated = None
         self.on_backup_saved = None
 
-        # 主控备份归档根目录 (自动生成独立专属文件夹 GWC_Master_Backups，规范收纳不乱放)
+        # 主控系统镜像与备份归档根目录 (统一收纳于 GWC_Master_Data/Backups，规范收纳不乱放)
         if not backup_store_dir:
-            base_d = os.path.dirname(os.path.abspath(__file__))
-            if getattr(sys, "frozen", False):
-                base_d = os.path.dirname(os.path.abspath(sys.executable))
-            self.backup_store_dir = os.path.join(base_d, "GWC_Master_Backups")
+            self.backup_store_dir = get_master_backup_dir()
         else:
             self.backup_store_dir = backup_store_dir
         os.makedirs(self.backup_store_dir, exist_ok=True)
+
+        # 自动迁移旧目录中的备份文件至专属目录 (GWC_Master_Backups / master_backups)
+        base_d = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_d = os.path.dirname(os.path.abspath(sys.executable))
+        for old_dir_name in ["GWC_Master_Backups", "master_backups"]:
+            old_d = os.path.join(base_d, old_dir_name)
+            if os.path.isdir(old_d) and os.path.abspath(old_d) != os.path.abspath(self.backup_store_dir):
+                try:
+                    for old_f in os.listdir(old_d):
+                        if old_f.lower().endswith((".gwcsysimg", ".gwcbackup")):
+                            src = os.path.join(old_d, old_f)
+                            dst = os.path.join(self.backup_store_dir, old_f)
+                            if not os.path.exists(dst):
+                                shutil.copy2(src, dst)
+                                try: os.remove(src)
+                                except Exception: pass
+                    if not os.listdir(old_d):
+                        try: os.rmdir(old_d)
+                        except Exception: pass
+                except Exception:
+                    pass
 
         # 展馆第三方智能中控多协议总线调度监听接口 (UDP:9889 | TCP:9890 | HTTP API:9891 | 串口COM)
         self.udp_control_port = 9889
@@ -243,7 +287,7 @@ class GwcMasterHub:
         """命令从机立即生成完整系统配置备份并回传给主控存储"""
         def on_resp(resp):
             if resp and resp.get("success"):
-                filename = resp.get("filename", f"Backup_{client_ip}_{int(time.time())}.gwcbackup")
+                filename = resp.get("filename", f"系统镜像_{client_ip}_{int(time.time())}.gwcsysimg")
                 b64_data = resp.get("b64_data", "")
                 if b64_data:
                     raw_bytes = base64.b64decode(b64_data)

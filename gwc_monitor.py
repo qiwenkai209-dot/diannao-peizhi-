@@ -310,8 +310,8 @@ class HostStatusCollector:
 
         # 读取受控端本地预设调用应用 (带 mtime 缓存，仅在修改时重新加载，避免心跳频繁读盘)
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            p_file = os.path.join(base_dir, "agent_preset_apps.json")
+            import gwc_desktop_helper as dh
+            p_file = dh.ConfigManager.get_preset_apps_path()
             if os.path.exists(p_file):
                 mtime = os.path.getmtime(p_file)
                 if mtime != self._preset_apps_mtime:

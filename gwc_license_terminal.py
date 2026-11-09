@@ -10,6 +10,7 @@
 
 import os
 import sys
+import shutil
 import time
 import struct
 import hashlib
@@ -304,19 +305,26 @@ class TerminalLicenseManager:
     """展馆控制终端商业授权管理器 (支持随时输入新激活码覆盖写入)"""
 
     def __init__(self, lic_filename: str = ".terminal_lic_2026.dat"):
-        # 存放在系统工作目录或用户数据目录下
-        candidates = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), lic_filename),
-            os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "GWC_Terminal", lic_filename),
-            os.path.join(os.path.expanduser("~"), lic_filename)
-        ]
-        self.lic_path = candidates[0]
-        # 确保所在目录存在
-        try:
-            os.makedirs(os.path.dirname(self.lic_path), exist_ok=True)
-        except Exception:
-            pass
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
 
+        # 统一归档在受控端专属文件夹 GWC_Terminal_Data/License/ 内部，绝不散落于程序根目录
+        lic_dir = os.path.join(base_dir, "GWC_Terminal_Data", "License")
+        os.makedirs(lic_dir, exist_ok=True)
+        new_lic_path = os.path.join(lic_dir, lic_filename)
+        old_lic_path = os.path.join(base_dir, lic_filename)
+
+        # 自动迁移根目录下遗留的旧凭证并清理根目录
+        if os.path.exists(old_lic_path) and not os.path.exists(new_lic_path):
+            try:
+                shutil.copy2(old_lic_path, new_lic_path)
+                try: os.remove(old_lic_path)
+                except Exception: pass
+            except Exception:
+                pass
+
+        self.lic_path = new_lic_path
         self.hw_hash = get_local_hw_fingerprint()
         self.nonce = (int(time.time()) // 100) % 4090 + 1
         self._cached_req_code = encode_request_code(self.hw_hash, self.nonce)

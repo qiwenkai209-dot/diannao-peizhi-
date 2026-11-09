@@ -248,8 +248,8 @@ class AgentAppUI:
         # 商业授权实例 (专属展馆控制终端全新算法引擎)
         self.license_mgr = lt.TerminalLicenseManager()
 
-        # 预设常用应用清单持久化
-        self.preset_apps_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_preset_apps.json")
+        # 预设常用应用清单持久化 (统一收纳于 GWC_Terminal_Data/Configs，绝不散落根目录)
+        self.preset_apps_file = dh.ConfigManager.get_preset_apps_path()
         self.preset_apps = self._load_preset_apps()
 
         # 本机自定义终端名称与中控连接
@@ -725,7 +725,7 @@ class AgentAppUI:
         ent_cname = tk.Entry(r_name, textvariable=self.custom_name_var, font=("Segoe UI", 9, "bold"), bg="#0f172a", fg=self.ACCENT_CYAN, width=18, relief="flat")
         ent_cname.pack(side=tk.LEFT, padx=(6, 8))
 
-        tk.Button(r_name, text="💾 保存名称", font=("Segoe UI", 8, "bold"), bg=self.ACCENT_BLUE, fg="#fff", relief="flat", padx=8, pady=1, cursor="hand2", command=self._save_custom_name).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(r_name, text="💾 保存并同步本地用户名", font=("Segoe UI", 8, "bold"), bg=self.ACCENT_BLUE, fg="#fff", relief="flat", padx=8, pady=1, cursor="hand2", command=self._save_custom_name).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(r_name, text=f"本机 IP: {local_ip}  (系统主机名: {socket.gethostname()})", font=("Segoe UI", 8), bg=self.CARD_BG, fg="#94a3b8").pack(side=tk.LEFT)
 
         r_port_tag = tk.Frame(c2, bg="#0f172a", padx=8, pady=3)
@@ -971,17 +971,17 @@ class AgentAppUI:
         top_acts = tk.Frame(box, bg=self.CARD_BG, padx=10, pady=8)
         top_acts.pack(fill=tk.X, pady=(0, 6))
 
-        tk.Button(top_acts, text="💾 一键备份本机当前系统配置", font=("Segoe UI", 9, "bold"), bg="#059669", fg="#fff", relief="flat", padx=12, pady=4, cursor="hand2", command=self._create_local_backup).pack(side=tk.LEFT, padx=3)
-        tk.Button(top_acts, text="🔄 还原选中的本地备份", font=("Segoe UI", 9, "bold"), bg=self.ACCENT_BLUE, fg="#fff", relief="flat", padx=12, pady=4, cursor="hand2", command=self._restore_selected_local_backup).pack(side=tk.LEFT, padx=6)
+        tk.Button(top_acts, text="💾 一键生成系统镜像 (.gwcsysimg)", font=("Segoe UI", 9, "bold"), bg="#059669", fg="#fff", relief="flat", padx=12, pady=4, cursor="hand2", command=self._create_local_backup).pack(side=tk.LEFT, padx=3)
+        tk.Button(top_acts, text="🔄 还原选中的系统镜像", font=("Segoe UI", 9, "bold"), bg=self.ACCENT_BLUE, fg="#fff", relief="flat", padx=12, pady=4, cursor="hand2", command=self._restore_selected_local_backup).pack(side=tk.LEFT, padx=6)
         tk.Button(top_acts, text="📂 打开备份目录", font=("Segoe UI", 8), bg="#334155", fg="#fff", relief="flat", padx=10, pady=4, cursor="hand2", command=self._open_backup_explorer).pack(side=tk.RIGHT)
 
         # 备份列表表格
         cols = ("time", "size", "notes")
         self.bk_tree = ttk.Treeview(box, columns=cols, show="tree headings", selectmode="browse")
-        self.bk_tree.heading("#0", text="备份文件包 (.gwcbackup)", anchor="w")
+        self.bk_tree.heading("#0", text="系统镜像 / 备份包 (.gwcsysimg / .gwcbackup)", anchor="w")
         self.bk_tree.heading("time", text="创建时间", anchor="center")
         self.bk_tree.heading("size", text="大小", anchor="e")
-        self.bk_tree.heading("notes", text="备份说明", anchor="w")
+        self.bk_tree.heading("notes", text="镜像说明 / 来源主机", anchor="w")
 
         self.bk_tree.column("#0", width=280)
         self.bk_tree.column("time", width=140)
@@ -1337,7 +1337,11 @@ class AgentAppUI:
         self.config["custom_name"] = name
         dh.ConfigManager.save_config(self.config)
         self.agent_client.set_custom_name(name)
-        messagebox.showinfo("终端名称已保存", f"本机终端名称已更新为: 【{name}】\n主控端中心及广播探测将优先以此名称显示。")
+
+        # 更改设备名称直接同步更改本地用户名与系统计算机名
+        ok, sys_msg = gwc_system_ops.rename_local_user_and_computer(name)
+        info_tip = f"本机终端名称已更新为: 【{name}】\n\n【系统底层更新结果】\n{sys_msg}\n\n主控端中心及广播探测已同步更新为此名称。"
+        messagebox.showinfo("设备与系统用户名已更新", info_tip)
 
     def _choose_backup_dir(self):
         cur = self.backup_dir_var.get().strip()
@@ -1437,34 +1441,82 @@ class AgentAppUI:
         p_dir = self.extra_proj_dir_var.get().strip()
         extra_dirs = [p_dir] if p_dir and os.path.isdir(p_dir) else None
 
+        # 第 1 次确认: 启动系统镜像扫描与预检
+        proj_hint = f"\n- 附加展项工程目录: {p_dir}" if extra_dirs else "\n- 附加展项工程目录: 无 (仅备份核心环境配置)"
+        if not messagebox.askyesno(
+            "系统镜像创建确认 (第 1/2 步)",
+            f"确定要开始创建当前工控机的完整系统镜像吗？{proj_hint}\n- 镜像存放目标目录: {b_dir}\n\n系统将首先执行底层环境与工程目录预检扫描，并校验磁盘剩余可用空间。"
+        ):
+            return
+
+        # 执行预检扫描与空间计算
+        est = gwc_backup.estimate_system_image_size(extra_dirs=extra_dirs, output_dir=b_dir)
+
+        # 磁盘空间预检警告判定
+        if est.get("is_space_tight"):
+            warn_msg = (
+                f"⚠️【高危磁盘空间不足警告】\n\n"
+                f"目标目录所在磁盘可用空间严重紧张！\n"
+                f"• 扫描归档文件总数: {est['file_count']} 个\n"
+                f"• 原始数据总体积: {est['raw_str']}\n"
+                f"• 预估生成镜像体积: {est['est_str']}\n"
+                f"• 目标磁盘剩余可用空间: {est['free_str']}\n\n"
+                f"当前剩余空间可能无法容纳压缩后的系统镜像，继续操作可能导致磁盘耗尽或备份中断！\n"
+                f"是否仍要强制尝试创建系统镜像？"
+            )
+            if not messagebox.askyesno("高危磁盘空间不足警告", warn_msg, icon="warning"):
+                return
+
+        # 第 2 次确认: 明确展示扫描后生成文件大小与目标信息
+        confirm_msg = (
+            f"【系统镜像打包就绪确认 (第 2/2 步)】\n\n"
+            f"预检扫描与容量校验已就绪：\n"
+            f"• 待归档项目总数: {est['file_count']} 项\n"
+            f"• 原始数据总体积: {est['raw_str']}\n"
+            f"• 预估系统镜像体积: {est['est_str']}\n"
+            f"• 目标存储路径: {est['output_dir']}\n"
+            f"• 目标磁盘可用空间: {est['free_str']}\n\n"
+            f"确认立即启动高压缩并生成标注系统镜像文件 (.gwcsysimg) 吗？"
+        )
+        if not messagebox.askyesno("确认启动镜像打包", confirm_msg):
+            return
+
         def runner():
             res = gwc_backup.create_backup_package(
                 name="",
-                notes="受控端本地一键备份 (含系统环境与展项工程)",
+                notes="工控系统完整镜像 (含系统环境与展项工程)",
                 output_dir=b_dir,
                 extra_dirs=extra_dirs
             )
             if res.get("success"):
                 sz_str = res.get("size_str", f"{res.get('size_mb')} MB")
+                fn = res.get("filename")
                 self.root.after(0, lambda: (
                     self._refresh_local_backup_tree(),
-                    messagebox.showinfo("备份成功", f"系统配置与展项工程已成功备份！\n目录: {b_dir}\n文件: {res.get('filename')}\n大小: {sz_str}")
+                    messagebox.showinfo("系统镜像打包成功", f"工控机系统镜像已成功打包生成！\n\n• 镜像文件: {fn}\n• 最终大小: {sz_str}\n• 归档目录: {b_dir}")
                 ))
             else:
-                self.root.after(0, lambda: messagebox.showerror("备份失败", res.get("error", "未知错误")))
+                self.root.after(0, lambda: messagebox.showerror("镜像生成失败", res.get("error", "未知错误")))
         threading.Thread(target=runner, daemon=True).start()
 
     def _restore_selected_local_backup(self):
         sel = self.bk_tree.selection()
         if not sel:
-            messagebox.showinfo("提示", "请先在列表中选择要还原的备份包！")
+            messagebox.showinfo("提示", "请先在列表中选择要还原的系统镜像包！")
             return
         bk_path = sel[0]
-        if messagebox.askyesno("还原确认", f"确定使用备份:\n{os.path.basename(bk_path)}\n一键还原恢复本机的网络设置、工控策略与启动项吗？"):
+        info = gwc_backup.inspect_backup_package(bk_path)
+        src_h = info.get("source_host") or info.get("manifest", {}).get("hostname", "未知主机")
+        cur_h = socket.gethostname()
+        diff_host_hint = ""
+        if src_h and src_h != cur_h and src_h != self.custom_name:
+            diff_host_hint = f"\n\n⚠️ 注意: 该镜像产生于主机 [{src_h}]，与当前本机 [{cur_h}] 不一致，请确认是否继续！"
+
+        if messagebox.askyesno("系统镜像还原确认", f"确定使用系统镜像:\n{os.path.basename(bk_path)}\n一键还原恢复本机的网络设置、工控策略与展项工程吗？{diff_host_hint}"):
             def runner():
                 res = gwc_backup.restore_backup_package(bk_path)
                 msg = res.get("msg", res.get("error"))
-                self.root.after(0, lambda: messagebox.showinfo("还原结果", f"系统还原完成:\n{msg}"))
+                self.root.after(0, lambda: messagebox.showinfo("还原结果", f"系统镜像还原完成:\n{msg}"))
             threading.Thread(target=runner, daemon=True).start()
 
     # ==================== 快捷键与生命周期 ====================

@@ -181,8 +181,21 @@ class MasterAppUI:
             except Exception:
                 pass
 
-        # 主机别名配置管理
-        self.alias_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_host_aliases.json")
+        # 主机别名配置管理 (统一收纳于 GWC_Master_Data/Configs，规范归档绝不乱放)
+        cfg_dir = gwc_master.get_master_config_dir()
+        self.alias_file = os.path.join(cfg_dir, "master_host_aliases.json")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        old_alias = os.path.join(base_dir, "master_host_aliases.json")
+        if os.path.exists(old_alias) and not os.path.exists(self.alias_file):
+            try:
+                import shutil
+                shutil.copy2(old_alias, self.alias_file)
+                try: os.remove(old_alias)
+                except Exception: pass
+            except Exception:
+                pass
         self.aliases = self._load_aliases()
 
         self.selected_ip = ""
@@ -1197,7 +1210,7 @@ class MasterAppUI:
         # ================= 右分栏: 备份归档历史库与下发 =================
         right_box = tk.LabelFrame(
             paned,
-            text=" 💾 主控备份历史归档库 (统一存储于 GWC_Master_Backups) ",
+            text=" 💾 主控系统镜像与备份归档库 (统一存储于 GWC_Master_Data/Backups) ",
             font=("Segoe UI", 9, "bold"),
             fg=self.ACCENT_GREEN,
             bg=self.BG_PANEL,
@@ -1212,7 +1225,7 @@ class MasterAppUI:
 
         btn_push_bk = tk.Button(
             r_bar,
-            text="📤 下发选中备份至目标主机并自动还原",
+            text="📤 下发选中镜像至目标主机并自动还原",
             font=("Segoe UI", 8, "bold"),
             bg=self.ACCENT_BLUE,
             fg="#ffffff",
@@ -1253,7 +1266,7 @@ class MasterAppUI:
         # 备份列表表格
         cols_b = ("host", "time", "size", "notes")
         self.master_bk_tree = ttk.Treeview(right_box, columns=cols_b, show="tree headings", selectmode="browse")
-        self.master_bk_tree.heading("#0", text="备份包文件 (.gwcbackup)", anchor="w")
+        self.master_bk_tree.heading("#0", text="系统镜像 / 备份包 (.gwcsysimg / .gwcbackup)", anchor="w")
         self.master_bk_tree.heading("host", text="来源主机", anchor="center")
         self.master_bk_tree.heading("time", text="归档时间", anchor="center")
         self.master_bk_tree.heading("size", text="大小", anchor="e")
@@ -1341,12 +1354,16 @@ class MasterAppUI:
         if clients:
             return clients[0]["ip"]
         return ""
-        if self.selected_ip:
-            return self.selected_ip
-        clients = self.master_hub.get_online_clients()
-        if clients:
-            return clients[0]["ip"]
-        return ""
+
+    def _on_notebook_tab_changed(self, event=None):
+        """当用户在顶部切换标签页时自动刷新对应工作台"""
+        try:
+            sel_idx = self.nb.index("current")
+            if sel_idx == 1:  # 备份中心
+                self._sync_backup_devices()
+                self._refresh_master_backup_tree()
+        except Exception:
+            pass
 
     def _refresh_master_backup_tree(self):
         for i in self.master_bk_tree.get_children():
@@ -1354,41 +1371,109 @@ class MasterAppUI:
         bks = self.master_hub.list_master_backups()
         for b in bks:
             sz_disp = b.get("size_str", f"{b.get('size_mb', 0)} MB")
+            src_h = b.get("source_host") or b.get("hostname", "")
             self.master_bk_tree.insert(
                 "", "end",
                 iid=b["path"],
                 text=b["filename"],
-                values=(b["hostname"], b["created_at"], sz_disp, b["notes"])
+                values=(src_h, b["created_at"], sz_disp, b["notes"])
             )
 
     def _master_push_backup(self):
         ip = self._get_backup_target_ip()
         if not ip:
-            messagebox.showinfo("提示", "请在上方【🎯 目标受控工控机】下拉框中选择接收还原的设备，\n或点击【🔍 发现/刷新在线设备】！")
+            messagebox.showinfo("提示", "请在左侧【局域网在线受控主机】列表中点击选择接收镜像的目标工控机！")
             return
         sel = self.master_bk_tree.selection()
         if not sel:
-            messagebox.showinfo("提示", "请在备份列表中选择要下发的 .gwcbackup 备份包！")
+            messagebox.showinfo("提示", "请在右侧归档列表中选择要下发的系统镜像包 (.gwcsysimg / .gwcbackup)！")
             return
         bk_path = sel[0]
-        if messagebox.askyesno("下发恢复确认", f"确定要将系统备份:\n{os.path.basename(bk_path)}\n下发至工控机 [{ip}] 并自动执行全系统一键还原吗？"):
-            self.notice_var.set(f"正在向下发备份包至工控机 [{ip}] ...")
-            self.master_hub.push_backup_to_agent(
-                ip, bk_path,
-                callback=lambda r: self._safe_after(lambda: messagebox.showinfo("还原反馈", f"从机 {ip} 还原结果:\n{r.get('msg', r.get('error'))}"))
+
+        # 1. 深度解析选中镜像包的元数据与来源主机
+        chk = gwc_backup.inspect_backup_package(bk_path)
+        if not chk.get("valid"):
+            messagebox.showerror("镜像包错误", f"选中的镜像包文件损坏或无效:\n{chk.get('error')}")
+            return
+
+        source_host = chk.get("source_host") or chk.get("manifest", {}).get("hostname", "")
+        pkg_time = chk.get("manifest", {}).get("created_at", "未知时间")
+        sz_disp = chk.get("size_str", f"{chk.get('size_mb', 0)} MB")
+        fn = os.path.basename(bk_path)
+
+        # 2. 获取当前目标工控机的名称与主机名
+        client_info = self.master_hub.clients.get(ip, {})
+        target_name = client_info.get("custom_name") or client_info.get("hostname", ip)
+        target_hostname = client_info.get("hostname", "")
+
+        # 3. 核心安全核验：检查选中的镜像文件是否与当前目标主机匹配！
+        clean_src = source_host.strip().lower()
+        clean_target_name = target_name.strip().lower()
+        clean_target_host = target_hostname.strip().lower()
+
+        is_matched = bool(
+            clean_src and (
+                clean_src == clean_target_name or
+                clean_src == clean_target_host or
+                clean_src in clean_target_name or
+                clean_target_host in clean_src
             )
+        )
+
+        if not is_matched:
+            # 跨主机覆盖高危警告拦截
+            warn_msg = (
+                f"⚠️【高危警告：镜像来源主机与目标受控机不一致！】\n\n"
+                f"系统安全核验检测到您当前选择的系统镜像并非来源于该目标工控机：\n"
+                f"• 当前目标工控机: 【{target_name}】 (IP: {ip})\n"
+                f"• 镜像原归档主机: 【{source_host or '未知来源'}】\n"
+                f"• 镜像文件名: {fn}\n"
+                f"• 镜像创建时间: {pkg_time}  ({sz_disp})\n\n"
+                f"🚨 跨机还原可能引发严重后果：\n"
+                f"1. 目标机的静态 IP 配置将被强制修改为原主机 IP，导致局域网发生 IP 冲突并与中控失联！\n"
+                f"2. 展馆不同展项的多媒体内容与自启动配置错乱，影响现场展出。\n\n"
+                f"请核实是否确实要强制进行跨机覆盖还原？\n"
+                f"点击【是】强制下发还原，点击【否】立即中止。"
+            )
+            if not messagebox.askyesno("高危跨机还原警告", warn_msg, icon="warning"):
+                return
+        else:
+            # 来源主机与目标机安全匹配通过
+            safe_msg = (
+                f"【主机安全匹配校验通过】\n\n"
+                f"• 目标受控工控机: 【{target_name}】 ({ip})\n"
+                f"• 镜像原归档主机: 【{source_host}】 (核验匹配一致)\n"
+                f"• 镜像文件名: {fn}\n"
+                f"• 镜像体积: {sz_disp}\n"
+                f"• 镜像归档时间: {pkg_time}\n\n"
+                f"确认将此系统镜像下发至工控机 [{ip}] 并自动执行全系统一键还原吗？"
+            )
+            if not messagebox.askyesno("系统镜像还原确认", safe_msg):
+                return
+
+        self.notice_var.set(f"正在向下发系统镜像至工控机 [{ip}] 并执行自动还原...")
+        self.master_hub.push_backup_to_agent(
+            ip, bk_path,
+            callback=lambda r: self._safe_after(lambda: messagebox.showinfo("还原反馈", f"从机 {ip} 还原结果:\n{r.get('msg', r.get('error'))}"))
+        )
 
     def _master_request_backup(self):
         ip = self._get_backup_target_ip()
         if not ip:
-            messagebox.showinfo("提示", "请在上方【🎯 目标受控工控机】下拉框中选择目标设备，\n或点击【🔍 发现/刷新在线设备】！")
+            messagebox.showinfo("提示", "请在左侧【局域网在线受控主机】列表中点击选择目标设备！")
             return
-        self.notice_var.set(f"正在命令工控机 [{ip}] 生成配置备份...")
+        client_info = self.master_hub.clients.get(ip, {})
+        target_name = client_info.get("custom_name") or client_info.get("hostname", ip)
+
+        if not messagebox.askyesno("远程系统镜像打包确认", f"确定命令目标工控机 【{target_name}】 ({ip})\n立即生成完整系统镜像并回传至主控端归档库吗？"):
+            return
+
+        self.notice_var.set(f"正在命令工控机 【{target_name} ({ip})】 生成系统镜像...")
         self.master_hub.request_agent_backup(
             ip,
             callback=lambda r: self._safe_after(lambda: (
                 self._refresh_master_backup_tree(),
-                messagebox.showinfo("完成", f"工控机 [{ip}] 备份已顺利生成并归档入库！")
+                messagebox.showinfo("完成", f"工控机 【{target_name}】 系统镜像已顺利生成并归档入库！\n文件: {r.get('filename')}\n大小: {r.get('size_str', '')}")
             ))
         )
 

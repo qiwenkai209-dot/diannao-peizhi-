@@ -816,3 +816,71 @@ def list_running_processes() -> list:
         pass
 
     return sorted(procs, key=lambda x: x["memory_mb"], reverse=True)
+
+
+def rename_local_user_and_computer(new_name: str) -> tuple:
+    """
+    直接修改本地系统的当前用户账户名以及计算机名 (Windows 原生，无第三方依赖)
+    :param new_name: 新的主机名 / 用户名
+    :return: (ok: bool, msg: str)
+    """
+    clean_name = re.sub(r'[\s\\/:*?"<>|]+', '', new_name).strip()
+    if not clean_name:
+        return False, "名称不能为空或包含非法特殊字符！"
+
+    success_items = []
+    fail_items = []
+
+    # 1. 修改本地当前登录用户名称 (Local Username)
+    current_user = os.environ.get("USERNAME", "")
+    if current_user and current_user != clean_name:
+        try:
+            flags = 0x08000000 if sys.platform == "win32" else 0
+            cmd_wmic = f'wmic useraccount where name="{current_user}" rename "{clean_name}"'
+            res = subprocess.run(cmd_wmic, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+            if res.returncode == 0 and b"ReturnValue = 0" in res.stdout:
+                success_items.append(f"本地用户账户已从 [{current_user}] 重命名为 [{clean_name}]")
+            else:
+                cmd_ps = f'powershell -Command "Rename-LocalUser -Name \'{current_user}\' -NewName \'{clean_name}\' -ErrorAction SilentlyContinue"'
+                res_ps = subprocess.run(cmd_ps, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+                if res_ps.returncode == 0:
+                    success_items.append(f"本地用户账户已重命名为 [{clean_name}]")
+                else:
+                    fail_items.append("本地用户重命名可能受系统权限限制")
+        except Exception as e:
+            fail_items.append(f"修改本地用户异常: {e}")
+    else:
+        success_items.append(f"本地用户名已匹配 [{clean_name}]")
+
+    # 2. 同时修改系统计算机名 (Computer Name)
+    current_computer = platform.node()
+    if current_computer != clean_name:
+        try:
+            flags = 0x08000000 if sys.platform == "win32" else 0
+            cmd_comp = f'wmic computersystem where caption="{current_computer}" rename "{clean_name}"'
+            res_comp = subprocess.run(cmd_comp, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+            if res_comp.returncode == 0 and b"ReturnValue = 0" in res_comp.stdout:
+                success_items.append(f"系统计算机名已更新为 [{clean_name}] (重启后生效)")
+            else:
+                cmd_ps_comp = f'powershell -Command "Rename-Computer -NewName \'{clean_name}\' -Force -ErrorAction SilentlyContinue"'
+                subprocess.run(cmd_ps_comp, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+                success_items.append(f"计算机名已更新为 [{clean_name}] (将在系统重启后完全生效)")
+
+            # 同步写入注册表
+            try:
+                for sub_key in [r"SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName",
+                                r"SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName"]:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub_key, 0, winreg.KEY_SET_VALUE) as k:
+                        winreg.SetValueEx(k, "ComputerName", 0, winreg.REG_SZ, clean_name)
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters", 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.SetValueEx(k, "Hostname", 0, winreg.REG_SZ, clean_name)
+                    winreg.SetValueEx(k, "NV Hostname", 0, winreg.REG_SZ, clean_name)
+            except Exception:
+                pass
+        except Exception as e:
+            fail_items.append(f"更新计算机名异常: {e}")
+
+    msg = "；\n".join(success_items)
+    if fail_items:
+        msg += "\n(注: " + "；".join(fail_items) + ")"
+    return True, msg

@@ -15,6 +15,7 @@ import ctypes
 from ctypes import wintypes
 import threading
 import winreg
+import shutil
 import gwc_discovery
 
 # Win32 API 常量
@@ -321,9 +322,56 @@ class ConfigManager:
     }
 
     @classmethod
-    def get_config_path(cls) -> str:
+    def get_terminal_data_dir(cls) -> str:
+        """获取受控端专属顶级数据文件夹 GWC_Terminal_Data (软件生成的唯一顶级文件夹，规范收纳绝不乱放)"""
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(base_dir, "agent_config.json")
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        d = os.path.join(base_dir, "GWC_Terminal_Data")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @classmethod
+    def get_config_path(cls) -> str:
+        """获取 agent_config.json 专属路径并支持旧文件无损迁移"""
+        cfg_dir = os.path.join(cls.get_terminal_data_dir(), "Configs")
+        os.makedirs(cfg_dir, exist_ok=True)
+        new_path = os.path.join(cfg_dir, "agent_config.json")
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        old_path = os.path.join(base_dir, "agent_config.json")
+
+        if os.path.exists(old_path) and not os.path.exists(new_path):
+            try:
+                shutil.copy2(old_path, new_path)
+                try: os.remove(old_path)
+                except Exception: pass
+            except Exception:
+                pass
+        return new_path
+
+    @classmethod
+    def get_preset_apps_path(cls) -> str:
+        """获取 agent_preset_apps.json 专属路径并支持旧文件无损迁移"""
+        cfg_dir = os.path.join(cls.get_terminal_data_dir(), "Configs")
+        os.makedirs(cfg_dir, exist_ok=True)
+        new_path = os.path.join(cfg_dir, "agent_preset_apps.json")
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        old_path = os.path.join(base_dir, "agent_preset_apps.json")
+
+        if os.path.exists(old_path) and not os.path.exists(new_path):
+            try:
+                shutil.copy2(old_path, new_path)
+                try: os.remove(old_path)
+                except Exception: pass
+            except Exception:
+                pass
+        return new_path
 
     @classmethod
     def load_config(cls) -> dict:

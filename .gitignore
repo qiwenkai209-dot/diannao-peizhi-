@@ -18,6 +18,15 @@ __build_cache_*
 # 临时参考文件
 armor_studio_ref.py
 
+# 软件运行时生成的统一专属数据文件夹 (规范归档，不提交仓库)
+GWC_Terminal_Data/
+GWC_Master_Data/
+GWC_Backups/
+GWC_Master_Backups/
+master_backups/
+*.gwcsysimg
+*.gwcbackup
+
 # 二进制可执行文件 (通过 GitHub Actions 云端构建并发布至 Release/Artifacts)
 *.exe
 
