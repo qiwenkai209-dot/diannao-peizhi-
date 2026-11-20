@@ -1,0 +1,117 @@
+name: 📱 构建展馆智能集群主控端 Android APK (方案A)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'gwc_master_android/**'
+      - '.github/workflows/build-android.yml'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-master:
+    name: 🤖 编译 Flutter Android 移动主控端 APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库代码 (Checkout Code)
+        uses: actions/checkout@v4
+
+      - name: 配置 Java 17 环境 (Setup Java 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 配置 Flutter 环境 (Setup Flutter)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: 检查 Flutter 与系统环境
+        run: |
+          flutter --version
+          java -version
+
+      - name: 初始化 Android 脚手架与权限注入
+        run: |
+          cd gwc_master_android
+          mkdir -p /tmp/lib_bak
+          cp -r lib /tmp/lib_bak/
+          flutter create --org com.guowenchuang.master --project-name gwc_master_android --platforms android .
+          rm -rf lib
+          cp -r /tmp/lib_bak/lib .
+
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            # 注入网络、广播与屏幕常亮权限
+            sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>\n    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>' "$MANIFEST"
+            sed -i 's/<application/<application android:usesCleartextTraffic="true"/' "$MANIFEST"
+          fi
+
+      - name: 获取 Flutter 项目依赖 (flutter pub get)
+        run: |
+          cd gwc_master_android
+          flutter pub get
+
+      - name: 编译 Android Release APK
+        run: |
+          cd gwc_master_android
+          flutter build apk --release
+
+      - name: 准备发布制品
+        run: |
+          mkdir -p release_apk
+          cp gwc_master_android/build/app/outputs/flutter-apk/app-release.apk release_apk/展馆智能集群主控端-Android.apk
+          cp gwc_master_android/build/app/outputs/flutter-apk/app-release.apk release_apk/GWC_Master_Hub_Android.apk
+          ls -lh release_apk/
+
+      - name: 上传构建成果物 (Upload Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: 展馆智能集群主控端-Android-APK
+          path: release_apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 自动发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v2.2.0-android' }}
+          name: 展馆智能集群主控端 Android 移动版 (方案A · 现代化触控中控)
+          body: |
+            ## 📱 展馆智能集群综合管控中心 · 移动主控端 (Android 版)
+
+            ### 🌟 核心特性说明:
+            1. **现代化触控中控大厅 (Material 3 深色科技风)**:
+               - 支持展馆无线手持平板 (iPad/Android Pad) 或壁挂触控中控大屏；
+               - 实时网格流式监控全展馆工控机状态 (CPU/GPU/内存/前台活动窗口/授权状态/延迟)；
+               - 智能自适应分辨率与横竖屏。
+            2. **全馆与分组批量管控**:
+               - 全馆一键关机、一键重启、一键静音、统一音量拖动调控；
+               - 单机快捷管理抽屉：音量调节、远程强杀进程、预设常用应用一键拉起。
+            3. **局域网设备雷达主动探测与上线监听 (UDP 9887)**:
+               - 一键全网段广播扫描所有在线工控机，即插即用一键纳管。
+            4. **第三方智能中控多协议总线调度 (UDP 9889 / TCP 9890 / HTTP 9891)**:
+               - 在安卓平板本地后台开辟中控调度中枢，支持快思聪/AMX/华为等外部中控硬件与浏览器一键调控。
+            5. **商业授权中枢与加密机**:
+               - 内置国文创加密机，支持为任意工控机从机一键远程免敲码签发永久/自定义时长授权。
+
+            ### 📦 下载与安装说明:
+            - 下载下方附带的 `展馆智能集群主控端-Android.apk` 或 `GWC_Master_Hub_Android.apk`；
+            - 在任意 Android 平板/手机上直接安装运行；
+            - 确保平板与展馆工控机处于同一局域网 Wi-Fi，即可实现全馆无线智能管控！
+          files: |
+            release_apk/展馆智能集群主控端-Android.apk
+            release_apk/GWC_Master_Hub_Android.apk
+          draft: false
+          prerelease: false

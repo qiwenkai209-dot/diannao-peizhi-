@@ -196,14 +196,35 @@ PUSH Btn_All_Shutdown
 
 ## ☁️ GitHub Actions 云端全自动构建与发布
 
-本项目已配置完善的 **GitHub Actions CI/CD 流水线**（`.github/workflows/build.yml`）：
+本项目已配置双端完善的 **GitHub Actions CI/CD 流水线**：
 
-- **工作流运行页面**：[All workflows](https://github.com/qiwenkai209-dot/diannao-peizhi-/actions)
-- **触发机制**：推送代码至 `main` / `master` 分支或在 GitHub Actions 页面点击 **Run workflow** 手动触发。
-- **构建产物**：
-  - `展馆控制终端.exe` / `GWC_Agent_Client.exe`（工控从机部署运行）
-  - `展馆智能集群主控端.exe` / `GWC_Master_Hub.exe`（主控室电脑部署运行）
-- **自动发布**：构建完成后自动上传 Artifacts（保存 30 天），并自动发布至 GitHub Releases 提供即装即用下载。
+- **工作流运行总览**：[All workflows · GitHub Actions](https://github.com/qiwenkai209-dot/diannao-peizhi-/actions)
+- **流水线一：Windows 双端 EXE 构建**（`.github/workflows/build.yml`）：
+  - 产物：`展馆控制终端.exe` + `展馆智能集群主控端.exe`
+- **流水线二：方案A · Android 移动端 APK 构建**（`.github/workflows/build-android.yml`）：
+  - 产物：`展馆智能集群主控端-Android.apk` / `GWC_Master_Hub_Android.apk`
+- **触发机制**：代码推送至 `main` 分支自动触发，或在 GitHub Actions 页面直接点击 **Run workflow** 手动一键触发。
+- **自动发布**：构建完成后自动上传 Artifacts（保存 30 天），并自动发布至 GitHub Releases，手机或平板可直接扫码/点击下载安装。
+
+---
+
+## 📱 方案A：展馆智能集群综合管控中心 · 移动主控端 (Android / Flutter)
+
+专为**展馆讲解员无线手持中控平板**（iPad / Android Pad）与**展厅壁挂触控中控屏**量身打造，采用现代 Material 3 深色科技风 UI，全面复刻 Windows 主控端的核心通信能力：
+
+1. **🎨 现代触控中控大厅**：
+   - 响应式自适应网格布局（平板/手机均可完美呈现）；
+   - 实时流式监控全展馆工控机状态（CPU / GPU / 内存 / 前台活动窗口 / 商业授权状态 / 网络延迟）。
+2. **⚡ 全馆与单机一键批调**：
+   - 全馆一键关机、一键重启（带防误触确认）；
+   - 全馆统一音量拖拽调控与一键静音；
+   - 单机侧滑管理抽屉：音量精细调节、预设展项应用一键拉起、异常进程强杀。
+3. **🔍 局域网在线从机雷达扫描 (UDP 9887)**：
+   - 一键全网段广播探测，发现从机即插即用一键纳管。
+4. **📡 第三方智能中控多协议总线 (UDP 9889 / TCP 9890 / HTTP 9891)**：
+   - 本地后台常驻多协议总线，支持快思聪/AMX/华为等外部硬件与手机浏览器一键调控。
+5. **🛡️ 商业授权中枢与加密机**：
+   - 内置国文创加密机，支持解析 8 位申请码，为任意从机一键签发永久/自定义时长商业授权激活码并远程推送。
 
 ---
 
