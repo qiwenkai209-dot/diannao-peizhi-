@@ -23,7 +23,7 @@ class GwcTheme {
         surface: surface,
         onSurface: textPrimary,
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: surfaceCard,
         elevation: 4,
         shape: RoundedRectangleBorder(
