@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/agent_device.dart';
 import '../core/master_hub.dart';
-import '../core/license_core.dart';
 import 'theme.dart';
 
 class DeviceControlSheet extends StatefulWidget {
@@ -21,7 +20,6 @@ class DeviceControlSheet extends StatefulWidget {
 class _DeviceControlSheetState extends State<DeviceControlSheet> {
   late double _volume;
   late bool _isMuted;
-  bool _isAuthorizing = false;
   final TextEditingController _procNameController = TextEditingController();
 
   @override
@@ -60,7 +58,7 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: GwcTheme.surface,
-        title: Text(title, style: const TextStyle(color: GwcTheme.accentAmber)),
+        title: Text(title, style: const TextStyle(color: GwcTheme.accentAmber, fontWeight: FontWeight.bold)),
         content: Text(content),
         actions: [
           TextButton(
@@ -77,7 +75,10 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                 {'force': true, 'timeout': 0},
               );
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('已向 [${widget.device.displayName}] 下发 $title 指令')),
+                SnackBar(
+                  backgroundColor: GwcTheme.surfaceCard,
+                  content: Text('已向 [${widget.device.displayName}] 下发 $title 指令'),
+                ),
               );
             },
             child: const Text('确认下发', style: TextStyle(color: Colors.white)),
@@ -87,63 +88,14 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
     );
   }
 
-  Future<void> _quickAuthorize() async {
-    if (widget.device.requestCode.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('未获取到该设备的申请码，无法签发！')),
-      );
-      return;
-    }
-
-    final dec = LicenseManager.decodeRequestCode(widget.device.requestCode);
-    if (dec['valid'] != true) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('申请码解析失败: ${dec["error"]}')),
-      );
-      return;
-    }
-
-    // 自动适配签发对应算法体系的永久商业激活码 (16位 或 12位)
-    final actCode = LicenseManager.generateLicense(dec, authType: 'permanent');
-
-    setState(() => _isAuthorizing = true);
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('正在向 [${widget.device.displayName}] 远程下发商业永久激活码并等待激活确认...'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-
-    final res = await widget.masterHub.sendRemoteAuth(widget.device.ip, actCode);
-
-    if (!mounted) return;
-    setState(() => _isAuthorizing = false);
-
-    if (res['success'] == true) {
-      setState(() {
-        widget.device.isAuthorized = true;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: GwcTheme.accentGreen,
-          content: Text('🎉 工控机 [${widget.device.displayName}] 商业授权激活成功！\n激活码: $actCode\n终端已解锁。'),
-          duration: const Duration(seconds: 4),
-        ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: GwcTheme.accentRed,
-          content: Text('❌ 远程激活未生效: ${res["msg"] ?? "从机拒绝或未应答"}\n已生成激活码: $actCode\n可尝试手动在终端输入。'),
-          duration: const Duration(seconds: 6),
-        ),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
+    // 动态同步工控机实时上报的音量与静音状态
+    if (_volume.toInt() != widget.device.volume) {
+      _volume = widget.device.volume.toDouble();
+    }
+    _isMuted = widget.device.isMuted;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
       decoration: const BoxDecoration(
@@ -154,26 +106,28 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 顶端拖动条
             Center(
               child: Container(
-                width: 48,
-                height: 5,
+                width: 40,
+                height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(4),
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
             ),
             const SizedBox(height: 16),
+
+            // 设备头部
             Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: GwcTheme.primary.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(12),
+                CircleAvatar(
+                  backgroundColor: widget.device.isOnline ? GwcTheme.accentGreen.withOpacity(0.2) : Colors.white10,
+                  child: Icon(
+                    Icons.computer,
+                    color: widget.device.isOnline ? GwcTheme.accentGreen : GwcTheme.textSecondary,
                   ),
-                  child: const Icon(Icons.desktop_windows, color: GwcTheme.primary, size: 28),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -185,8 +139,8 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                         style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                       ),
                       Text(
-                        'IP: ${widget.device.ip}  |  延迟: ${widget.device.latencyMs}ms',
-                        style: const TextStyle(color: GwcTheme.textSecondary, fontSize: 13),
+                        'IP: ${widget.device.ip} · 延迟: ${widget.device.latencyMs}ms · 通道: ${widget.device.source}',
+                        style: const TextStyle(color: GwcTheme.textSecondary, fontSize: 12),
                       ),
                     ],
                   ),
@@ -197,10 +151,42 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                 ),
               ],
             ),
-            const SizedBox(height: 20),
+            const Divider(height: 24),
 
-            // 音量与静音控制
+            // 前台活动窗口监控回显
+            if (widget.device.activeWindow.isNotEmpty) ...[
+              Card(
+                color: GwcTheme.surfaceCard,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.web_asset, size: 20, color: GwcTheme.primary),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('当前工控前台运行窗口:', style: TextStyle(color: GwcTheme.textSecondary, fontSize: 11)),
+                            Text(
+                              widget.device.activeWindow,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+
+            // 快捷音量调控
             Card(
+              color: GwcTheme.surfaceCard,
               child: Padding(
                 padding: const EdgeInsets.all(14),
                 child: Column(
@@ -209,18 +195,33 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('🔊 主音量调节', style: TextStyle(fontWeight: FontWeight.w600)),
-                        Text('${_volume.toInt()}%', style: const TextStyle(color: GwcTheme.primary, fontWeight: FontWeight.bold)),
+                        Row(
+                          children: [
+                            Icon(
+                              _isMuted ? Icons.volume_off : Icons.volume_up,
+                              color: _isMuted ? GwcTheme.accentRed : GwcTheme.primary,
+                            ),
+                            const SizedBox(width: 8),
+                            const Text('主音频音量 (实时回显与双向同步)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                          ],
+                        ),
+                        Text(
+                          _isMuted ? '静音中' : '${_volume.toInt()}%',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: _isMuted ? GwcTheme.accentRed : GwcTheme.primary,
+                          ),
+                        ),
                       ],
                     ),
+                    const SizedBox(height: 6),
                     Row(
                       children: [
                         IconButton(
-                          icon: Icon(
-                            _isMuted ? Icons.volume_off : Icons.volume_up,
-                            color: _isMuted ? GwcTheme.accentAmber : GwcTheme.primary,
-                          ),
+                          icon: Icon(_isMuted ? Icons.volume_off : Icons.volume_mute),
+                          color: _isMuted ? GwcTheme.accentRed : GwcTheme.textSecondary,
                           onPressed: _toggleMute,
+                          tooltip: _isMuted ? '解除静音' : '快速静音',
                         ),
                         Expanded(
                           child: Slider(
@@ -261,7 +262,7 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                         {'path': path},
                       );
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('已下发启动: $name')),
+                        SnackBar(content: Text('已向 [${widget.device.displayName}] 下发启动: $name')),
                       );
                     },
                   );
@@ -270,7 +271,7 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
               const SizedBox(height: 16),
             ],
 
-            // 电源管理与授权
+            // 电源管理 (远程重启与关机)
             Row(
               children: [
                 Expanded(
@@ -292,31 +293,6 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-
-            // 远程授权按钮
-            if (!widget.device.isAuthorized)
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: GwcTheme.accentAmber,
-                    foregroundColor: Colors.black,
-                  ),
-                  icon: _isAuthorizing
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
-                        )
-                      : const Icon(Icons.verified),
-                  label: Text(
-                    _isAuthorizing ? '正在下发授权并等待工控机确认...' : '一键签发永久商业授权并下发',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  onPressed: _isAuthorizing ? null : _quickAuthorize,
-                ),
-              ),
             const SizedBox(height: 24),
           ],
         ),
@@ -324,4 +300,3 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
     );
   }
 }
-

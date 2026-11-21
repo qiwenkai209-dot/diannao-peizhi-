@@ -152,6 +152,18 @@ class AgentDiscoveryServer:
                 except Exception:
                     pass
 
+        vol, is_muted = (50, False)
+        fg_window = ""
+        preset_apps = []
+        try:
+            import gwc_system_ops
+            vol, is_muted = gwc_system_ops.get_current_volume()
+            import gwc_monitor
+            fg_window = gwc_monitor._collector.get_current_foreground_window()
+            preset_apps = gwc_monitor._collector.collect_full_status().get("preset_apps", [])
+        except Exception:
+            pass
+
         return {
             "hostname": hostname,
             "custom_name": custom_name,
@@ -160,6 +172,11 @@ class AgentDiscoveryServer:
             "cpu": cpu_usage,
             "gpu": gpu_usage,
             "mem": mem_usage,
+            "volume": vol,
+            "is_muted": is_muted,
+            "active_window": fg_window,
+            "foreground_window": fg_window,
+            "preset_apps": preset_apps,
             "connected_master": connected,
             "current_master_ip": master_ip,
             "request_code": req_code,
@@ -188,8 +205,9 @@ class AgentDiscoveryServer:
 
                     json_str = data[len(DISCOVERY_MAGIC):].decode("utf-8", errors="ignore")
                     msg = json.loads(json_str)
+                    cmd = msg.get("cmd", "")
 
-                    if msg.get("cmd") == "DISCOVER_PROBE":
+                    if cmd == "DISCOVER_PROBE" or cmd == "CMD_GET_STATUS":
                         sender_master_ip = msg.get("master_ip") or addr[0]
                         master_tcp_port = msg.get("master_port", 9888)
                         auto_connect = msg.get("auto_connect", False)
@@ -197,7 +215,7 @@ class AgentDiscoveryServer:
                         # 回复响应包
                         reply_info = self._get_device_info()
                         resp_data = {
-                            "cmd": "DISCOVER_REPLY",
+                            "cmd": "DISCOVER_REPLY" if cmd == "DISCOVER_PROBE" else "STATUS_REPORT",
                             "probe_token": msg.get("token", ""),
                             "info": reply_info,
                             "timestamp": time.time()
@@ -213,6 +231,78 @@ class AgentDiscoveryServer:
                                 self.agent_client.set_master_address(sender_master_ip, master_tcp_port)
                                 if not getattr(self.agent_client, "running", False):
                                     self.agent_client.start()
+
+                    elif cmd == "CMD_VOLUME":
+                        action = msg.get("action", "set")
+                        level = msg.get("level", 50)
+                        try:
+                            import gwc_system_ops
+                            gwc_system_ops.remote_volume_control(action, level)
+                        except Exception:
+                            pass
+                        # 立即回复最新回显
+                        reply_info = self._get_device_info()
+                        resp_data = {
+                            "cmd": "DIRECT_CMD_ACK",
+                            "action_cmd": cmd,
+                            "token": msg.get("token", ""),
+                            "success": True,
+                            "info": reply_info,
+                            "timestamp": time.time()
+                        }
+                        self.sock.sendto(DISCOVERY_MAGIC + json.dumps(resp_data, ensure_ascii=False).encode("utf-8"), addr)
+
+                    elif cmd == "CMD_REBOOT":
+                        try:
+                            import gwc_system_ops
+                            gwc_system_ops.remote_reboot(force=msg.get("force", True), timeout=msg.get("timeout", 0))
+                        except Exception:
+                            pass
+                        resp_data = {
+                            "cmd": "DIRECT_CMD_ACK",
+                            "action_cmd": cmd,
+                            "token": msg.get("token", ""),
+                            "success": True,
+                            "msg": "正在执行重启",
+                            "timestamp": time.time()
+                        }
+                        self.sock.sendto(DISCOVERY_MAGIC + json.dumps(resp_data, ensure_ascii=False).encode("utf-8"), addr)
+
+                    elif cmd == "CMD_SHUTDOWN":
+                        try:
+                            import gwc_system_ops
+                            gwc_system_ops.remote_shutdown(force=msg.get("force", True), timeout=msg.get("timeout", 0))
+                        except Exception:
+                            pass
+                        resp_data = {
+                            "cmd": "DIRECT_CMD_ACK",
+                            "action_cmd": cmd,
+                            "token": msg.get("token", ""),
+                            "success": True,
+                            "msg": "正在执行关机",
+                            "timestamp": time.time()
+                        }
+                        self.sock.sendto(DISCOVERY_MAGIC + json.dumps(resp_data, ensure_ascii=False).encode("utf-8"), addr)
+
+                    elif cmd == "CMD_RUN_APP":
+                        path = msg.get("path", "")
+                        args = msg.get("args", "")
+                        workdir = msg.get("workdir", "")
+                        try:
+                            import gwc_system_ops
+                            res = gwc_system_ops.remote_run_app(path, args, workdir)
+                        except Exception as ex:
+                            res = {"success": False, "error": str(ex)}
+                        resp_data = {
+                            "cmd": "DIRECT_CMD_ACK",
+                            "action_cmd": cmd,
+                            "token": msg.get("token", ""),
+                            "success": res.get("success", True),
+                            "msg": res.get("msg", ""),
+                            "info": self._get_device_info(),
+                            "timestamp": time.time()
+                        }
+                        self.sock.sendto(DISCOVERY_MAGIC + json.dumps(resp_data, ensure_ascii=False).encode("utf-8"), addr)
 
                     elif msg.get("cmd") == "CMD_REMOTE_AUTH":
                         act_code = msg.get("code", "")

@@ -587,6 +587,54 @@ def remote_volume_control(action: str = "set", level: int = 50) -> dict:
     return {"success": False, "error": "未知音量指令"}
 
 
+def get_current_volume() -> tuple:
+    """获取当前系统主音频音量百分比与静音状态 -> (level: int, is_muted: bool)"""
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ('Data1', ctypes.c_ulong),
+                ('Data2', ctypes.c_ushort),
+                ('Data3', ctypes.c_ushort),
+                ('Data4', ctypes.c_byte * 8)
+            ]
+            def __init__(self, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8):
+                self.Data1 = l
+                self.Data2 = w1
+                self.Data3 = w2
+                self.Data4 = (ctypes.c_byte * 8)(b1, b2, b3, b4, b5, b6, b7, b8)
+
+        CLSID_MMDeviceEnumerator = GUID(0xBCDE0395, 0xE52F, 0x467C, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E)
+        IID_IMMDeviceEnumerator = GUID(0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6)
+        IID_IAudioEndpointVolume = GUID(0x5CDF2C82, 0x841E, 0x4546, 0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A)
+
+        ctypes.windll.ole32.CoInitialize(None)
+        enumerator = ctypes.c_void_p()
+        hr = ctypes.windll.ole32.CoCreateInstance(
+            ctypes.byref(CLSID_MMDeviceEnumerator), None, 1,
+            ctypes.byref(IID_IMMDeviceEnumerator), ctypes.byref(enumerator)
+        )
+        if hr == 0 and enumerator.value:
+            enum_vtable = ctypes.cast(ctypes.cast(enumerator, ctypes.POINTER(ctypes.c_void_p)).contents, ctypes.POINTER(ctypes.c_void_p))
+            GetDefaultAudioEndpoint_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(enum_vtable[4])
+            device = ctypes.c_void_p()
+            if GetDefaultAudioEndpoint_fn(enumerator, 0, 1, ctypes.byref(device)) == 0 and device.value:
+                dev_vtable = ctypes.cast(ctypes.cast(device, ctypes.POINTER(ctypes.c_void_p)).contents, ctypes.POINTER(ctypes.c_void_p))
+                Activate_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))(dev_vtable[3])
+                endpoint_vol = ctypes.c_void_p()
+                if Activate_fn(device, ctypes.byref(IID_IAudioEndpointVolume), 23, None, ctypes.byref(endpoint_vol)) == 0 and endpoint_vol.value:
+                    vol_vtable = ctypes.cast(ctypes.cast(endpoint_vol, ctypes.POINTER(ctypes.c_void_p)).contents, ctypes.POINTER(ctypes.c_void_p))
+                    GetVol_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_float))(vol_vtable[9])
+                    vol_val = ctypes.c_float()
+                    GetVol_fn(endpoint_vol, ctypes.byref(vol_val))
+                    GetMute_fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool))(vol_vtable[15])
+                    mute_val = ctypes.c_bool()
+                    GetMute_fn(endpoint_vol, ctypes.byref(mute_val))
+                    return (int(round(vol_val.value * 100)), bool(mute_val.value))
+    except Exception:
+        pass
+    return (50, False)
+
+
 def remote_run_app(app_path: str, args: str = "", workdir: str = "") -> dict:
     """远程极速启动应用程序 (独立进程组与桌面分离，自动展开环境变量与工作目录，零阻塞即刻返回)"""
     app_path = os.path.expandvars(app_path.strip().strip('"'))

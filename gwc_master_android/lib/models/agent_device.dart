@@ -60,16 +60,24 @@ class AgentDevice {
     if (data.containsKey('custom_name') && (data['custom_name'] as String).isNotEmpty) {
       customName = data['custom_name'] as String;
     }
-    if (data.containsKey('cpu')) {
+    if (data.containsKey('cpu_percent')) {
+      cpu = (data['cpu_percent'] as num).toDouble();
+    } else if (data.containsKey('cpu')) {
       cpu = (data['cpu'] as num).toDouble();
     }
-    if (data.containsKey('gpu')) {
+    if (data.containsKey('gpu_percent')) {
+      gpu = (data['gpu_percent'] as num).toDouble();
+    } else if (data.containsKey('gpu')) {
       gpu = (data['gpu'] as num).toDouble();
     }
-    if (data.containsKey('mem')) {
+    if (data.containsKey('memory') && data['memory'] is Map && (data['memory'] as Map).containsKey('percent')) {
+      mem = ((data['memory'] as Map)['percent'] as num).toDouble();
+    } else if (data.containsKey('mem')) {
       mem = (data['mem'] as num).toDouble();
     }
-    if (data.containsKey('active_window')) {
+    if (data.containsKey('foreground_window') && (data['foreground_window'] as String?)?.isNotEmpty == true) {
+      activeWindow = data['foreground_window'] as String;
+    } else if (data.containsKey('active_window')) {
       activeWindow = (data['active_window'] as String?) ?? '';
     }
     if (data.containsKey('authorized')) {
@@ -88,9 +96,13 @@ class AgentDevice {
     }
     if (data.containsKey('volume')) {
       volume = (data['volume'] as num).toInt();
+    } else if (data.containsKey('level')) {
+      volume = (data['level'] as num).toInt();
     }
     if (data.containsKey('is_muted')) {
       isMuted = data['is_muted'] == true;
+    } else if (data.containsKey('muted')) {
+      isMuted = data['muted'] == true;
     }
     lastSeen = DateTime.now();
   }

@@ -6,16 +6,18 @@ import '../models/agent_device.dart';
 import 'crypto.dart';
 import 'discovery.dart';
 
-/// 国文创展馆主控综合集群管理中心 (Dart 核心实现)
+/// 国文创展馆主控综合集群管理中心 (Dart 核心实现 - 全域双总线直连架构)
 class GwcMasterHub {
   static const int defaultMasterPort = 9888;
 
   ServerSocket? _serverSocket;
+  RawDatagramSocket? _udpSocket;
+  Timer? _telemetryTimer;
   bool _running = false;
+
   final Map<String, AgentDevice> _devices = {};
   final Map<String, Socket> _clientSockets = {};
   final Map<String, BytesBuilder> _recvBuffers = {};
-  final Map<String, Completer<Map<String, dynamic>>> _pendingAuthRequests = {};
 
   final void Function()? onDevicesChanged;
   final void Function(String eventLog)? onLogMessage;
@@ -26,27 +28,61 @@ class GwcMasterHub {
   List<AgentDevice> get devices => _devices.values.toList();
   int get onlineCount => _devices.values.where((d) => d.isOnline).length;
 
-  /// 启动 TCP 9888 服务端监听
+  /// 启动 TCP 9888 服务端监听 + UDP 9887 控制与遥测总线
   Future<void> start({int port = defaultMasterPort}) async {
     if (_running) return;
+    _running = true;
+
+    // 1. 启动 TCP 9888 长连接服务
     try {
       _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, port);
-      _running = true;
-      onLogMessage?.call('🏛️ 主控端集群通信总线已启动: TCP 端口 $port');
+      onLogMessage?.call('🏛️ 集群 TCP 控制总线已就绪: 端口 $port');
 
       _serverSocket?.listen(
         _handleClientConnection,
         onError: (e) {
-          onLogMessage?.call('[-] 集群监听套接字异常: $e');
+          onLogMessage?.call('[-] TCP 集群监听套接字异常: $e');
         },
       );
     } catch (e) {
-      onLogMessage?.call('[-] 绑定 TCP $port 端口失败: $e');
+      onLogMessage?.call('[-] 绑定 TCP $port 端口异常: $e');
+    }
+
+    // 2. 启动 UDP 通信套接字并开启持续心跳与回显接收
+    try {
+      _udpSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        0,
+        reuseAddress: true,
+      );
+      _udpSocket?.broadcastEnabled = true;
+
+      _udpSocket?.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          final dg = _udpSocket?.receive();
+          if (dg != null) {
+            _handleUdpPacket(dg.address.address, dg.data);
+          }
+        }
+      });
+
+      // 每 2 秒向全馆广播一次状态轮询，实现无缝实时回显
+      _telemetryTimer = Timer.periodic(const Duration(milliseconds: 2000), (_) {
+        _pollClusterTelemetry();
+      });
+
+      // 立即触发一次全馆扫描轮询
+      _pollClusterTelemetry();
+    } catch (e) {
+      onLogMessage?.call('[-] 启动 UDP 遥测总线异常: $e');
     }
   }
 
   void stop() {
     _running = false;
+    _telemetryTimer?.cancel();
+    _telemetryTimer = null;
+
     for (final s in _clientSockets.values) {
       try {
         s.destroy();
@@ -56,23 +92,68 @@ class GwcMasterHub {
     _recvBuffers.clear();
     _serverSocket?.close();
     _serverSocket = null;
-    onLogMessage?.call('[-] 主控端服务已停止');
+
+    _udpSocket?.close();
+    _udpSocket = null;
+    onLogMessage?.call('[-] 主控端服务已安全停止');
+  }
+
+  /// 周期性向全馆广播轻量状态查询，驱动毫秒级状态回显
+  void _pollClusterTelemetry() {
+    if (_udpSocket == null) return;
+    try {
+      final probe = {
+        'cmd': 'CMD_GET_STATUS',
+        'token': 'poll_${DateTime.now().millisecondsSinceEpoch}',
+        'master_port': defaultMasterPort,
+        'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
+      };
+      final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(probe)}');
+
+      // 1. 全网广播
+      _udpSocket?.send(raw, InternetAddress('255.255.255.255'), GwcDiscovery.discoveryPort);
+
+      // 2. 对已记录的所有设备 IP 精准单播
+      for (final dev in _devices.values) {
+        try {
+          _udpSocket?.send(raw, InternetAddress(dev.ip), GwcDiscovery.discoveryPort);
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  /// 解析处理工控机回传的 UDP 报文 (实时回显系统状态、音量、进程)
+  void _handleUdpPacket(String remoteIp, Uint8List data) {
+    try {
+      final text = utf8.decode(data, allowMalformed: true);
+      if (!text.startsWith(GwcDiscovery.discoveryMagic)) return;
+
+      final jsonStr = text.substring(GwcDiscovery.discoveryMagic.length);
+      final msg = jsonDecode(jsonStr) as Map<String, dynamic>;
+      final info = (msg['info'] as Map<String, dynamic>?) ?? msg;
+
+      final ip = (info['ip'] as String?)?.isNotEmpty == true
+          ? info['ip'] as String
+          : remoteIp;
+
+      final dev = _devices[ip] ?? AgentDevice(ip: ip, source: 'udp');
+      dev.updateFromReport(info);
+      _devices[ip] = dev;
+      onDevicesChanged?.call();
+    } catch (_) {}
   }
 
   /// 接收并处理工控受控端的 TCP 接入
   void _handleClientConnection(Socket client) {
     final remoteIp = client.remoteAddress.address;
-    onLogMessage?.call('[+] 受控工控机接入: $remoteIp');
+    onLogMessage?.call('[+] 受控工控机建立长连接: $remoteIp');
 
     _clientSockets[remoteIp] = client;
     _recvBuffers[remoteIp] = BytesBuilder();
 
-    // 确保设备注册到列表
-    if (!_devices.containsKey(remoteIp)) {
-      _devices[remoteIp] = AgentDevice(ip: remoteIp, source: 'tcp');
-    } else {
-      _devices[remoteIp]!.source = 'tcp';
-    }
+    final dev = _devices[remoteIp] ?? AgentDevice(ip: remoteIp, source: 'tcp');
+    dev.source = 'tcp';
+    _devices[remoteIp] = dev;
     onDevicesChanged?.call();
 
     client.listen(
@@ -96,9 +177,7 @@ class GwcMasterHub {
     buffer.add(chunk);
     var bytes = buffer.toBytes();
 
-    // 循环提取解包 GWCC 完整封包
     while (bytes.length >= 8) {
-      // 寻找 MAGIC_HEADER
       var magicIdx = -1;
       for (var i = 0; i <= bytes.length - 4; i++) {
         if (bytes[i] == GwcCrypto.magicHeader[0] &&
@@ -126,7 +205,6 @@ class GwcMasterHub {
       ).getUint32(0, Endian.big);
 
       if (bytes.length - 8 < totalLen) {
-        // 数据包尚未完整接收
         break;
       }
 
@@ -153,134 +231,106 @@ class GwcMasterHub {
       dev.updateFromReport(payload);
       _devices[ip] = dev;
       onDevicesChanged?.call();
-    } else if (type == 'RESP_CMD_REMOTE_AUTH') {
-      // 收到工控机对远程授权的 TCP 响应确认
-      final ok = payload['success'] == true;
-      if (ok && _devices.containsKey(ip)) {
-        _devices[ip]!.isAuthorized = true;
-        onDevicesChanged?.call();
-      }
-      final completer = _pendingAuthRequests.remove(ip);
-      if (completer != null && !completer.isCompleted) {
-        completer.complete(payload);
-      }
     }
   }
 
   void _onClientDisconnected(String ip) {
     _clientSockets.remove(ip);
     _recvBuffers.remove(ip);
-    onLogMessage?.call('[-] 工控机断开长连接: $ip');
+    onLogMessage?.call('[-] 工控机长连接断开: $ip');
     onDevicesChanged?.call();
   }
 
-  /// 向单个指定 IP 下发指令
+  /// 向单个指定工控机下发指令 (双通道并发下发: TCP + UDP 9887 直连单播，毫秒级必达)
   bool sendCommand(String ip, String cmd, Map<String, dynamic> payload) {
-    final socket = _clientSockets[ip];
-    if (socket == null) return false;
+    var sentSuccess = false;
 
-    try {
-      final packet = GwcCrypto.packPacket(cmd, payload);
-      socket.add(packet);
-      return true;
-    } catch (e) {
-      return false;
+    // 1. 本地先行乐观更新，音量与控制即时回显
+    if (_devices.containsKey(ip)) {
+      if (cmd == 'CMD_VOLUME') {
+        if (payload['action'] == 'set' && payload.containsKey('level')) {
+          _devices[ip]!.volume = (payload['level'] as num).toInt();
+          _devices[ip]!.isMuted = false;
+        } else if (payload['action'] == 'mute') {
+          _devices[ip]!.isMuted = true;
+        } else if (payload['action'] == 'unmute') {
+          _devices[ip]!.isMuted = false;
+        }
+      }
+      onDevicesChanged?.call();
     }
-  }
 
-  /// 远程向工控机精准签发并下发商业授权 (双通道: TCP长连 + UDP 9887直连单播)
-  Future<Map<String, dynamic>> sendRemoteAuth(
-    String ip,
-    String actCode, {
-    Duration timeout = const Duration(seconds: 4),
-  }) async {
-    final token = 'auth_${DateTime.now().millisecondsSinceEpoch}_${ip.replaceAll(".", "_")}';
-    final completer = Completer<Map<String, dynamic>>();
-    _pendingAuthRequests[ip] = completer;
+    // 2. 通道一：TCP 长连接（若存在）
+    final socket = _clientSockets[ip];
+    if (socket != null) {
+      try {
+        final packet = GwcCrypto.packPacket(cmd, payload);
+        socket.add(packet);
+        sentSuccess = true;
+      } catch (_) {}
+    }
 
-    // 通道 1: 如果有 TCP 长连接，通过 TCP 下发
-    final tcpSent = sendCommand(ip, 'CMD_REMOTE_AUTH', {
-      'code': actCode,
-      'token': token,
-    });
-
-    // 通道 2: 通过 UDP 9887 单播精准直达工控机
-    RawDatagramSocket? udpSocket;
+    // 3. 通道二：UDP 9887 直连单播直达工控机
     try {
-      udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      final reqMap = {
-        'cmd': 'CMD_REMOTE_AUTH',
-        'code': actCode,
-        'token': token,
+      final udpMsg = {
+        'cmd': cmd,
+        ...payload,
         'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
       };
-      final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(reqMap)}');
-      udpSocket.send(raw, InternetAddress(ip), GwcDiscovery.discoveryPort);
+      final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(udpMsg)}');
+      _udpSocket?.send(raw, InternetAddress(ip), GwcDiscovery.discoveryPort);
+      sentSuccess = true;
+    } catch (_) {}
 
-      // 监听 UDP 单播回复 ACK
-      udpSocket.listen((event) {
-        if (event == RawSocketEvent.read) {
-          final dg = udpSocket?.receive();
-          if (dg != null) {
-            final text = utf8.decode(dg.data, allowMalformed: true);
-            if (text.startsWith(GwcDiscovery.discoveryMagic)) {
-              final jsonStr = text.substring(GwcDiscovery.discoveryMagic.length);
-              try {
-                final resp = jsonDecode(jsonStr) as Map<String, dynamic>;
-                if (resp['cmd'] == 'CMD_REMOTE_AUTH_ACK') {
-                  final ok = resp['success'] == true;
-                  if (ok && _devices.containsKey(ip)) {
-                    _devices[ip]!.isAuthorized = true;
-                    onDevicesChanged?.call();
-                  }
-                  if (!completer.isCompleted) {
-                    completer.complete(resp);
-                  }
-                }
-              } catch (_) {}
-            }
-          }
-        }
-      });
-    } catch (e) {
-      onLogMessage?.call('[-] UDP 授权下发异常: $e');
-    }
-
-    try {
-      final res = await completer.future.timeout(timeout);
-      udpSocket?.close();
-      _pendingAuthRequests.remove(ip);
-      return res;
-    } on TimeoutException {
-      udpSocket?.close();
-      _pendingAuthRequests.remove(ip);
-      return {
-        'success': false,
-        'msg': tcpSent
-            ? '已通过 TCP 发送但工控机未在 ${timeout.inSeconds} 秒内返回确认'
-            : '工控机未响应 (未建立 TCP 连接且 UDP 直连未应答，请检查是否处于同一局域网)'
-      };
-    } catch (ex) {
-      udpSocket?.close();
-      _pendingAuthRequests.remove(ip);
-      return {'success': false, 'msg': '下发异常: $ex'};
-    }
+    return sentSuccess;
   }
 
-  /// 向全馆所有在线工控机广播下发指令
+  /// 向全馆所有工控机广播下发指令 (全馆一键关机、一键重启、统一音量拖动调控)
   int broadcastCommand(String cmd, Map<String, dynamic> payload) {
-    var count = 0;
+    var targetCount = _devices.length;
+    if (targetCount == 0) targetCount = 1;
+
+    // 1. 本地先行乐观批量更新
+    if (cmd == 'CMD_VOLUME') {
+      final level = (payload['level'] as num?)?.toInt() ?? 50;
+      for (final dev in _devices.values) {
+        dev.volume = level;
+        dev.isMuted = false;
+      }
+      onDevicesChanged?.call();
+    }
+
+    // 2. 通道一：向已建立 TCP 连接的所有工控机发送
     for (final entry in _clientSockets.entries) {
       try {
         final packet = GwcCrypto.packPacket(cmd, payload);
         entry.value.add(packet);
-        count++;
       } catch (_) {}
     }
-    return count;
+
+    // 3. 通道二：向全网广播地址 255.255.255.255 发送 UDP 广播报文
+    final udpMsg = {
+      'cmd': cmd,
+      ...payload,
+      'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
+    };
+    final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(udpMsg)}');
+
+    try {
+      _udpSocket?.send(raw, InternetAddress('255.255.255.255'), GwcDiscovery.discoveryPort);
+    } catch (_) {}
+
+    // 4. 通道三：对所有已知工控机 IP 逐一发送 UDP 单播补充
+    for (final dev in _devices.values) {
+      try {
+        _udpSocket?.send(raw, InternetAddress(dev.ip), GwcDiscovery.discoveryPort);
+      } catch (_) {}
+    }
+
+    return targetCount;
   }
 
-  /// 纳管新扫描到的设备
+  /// 纳管新扫描或探测到的设备
   void registerDiscoveredDevice(AgentDevice device) {
     if (_devices.containsKey(device.ip)) {
       _devices[device.ip]!.updateFromReport(device.toJson());
@@ -290,4 +340,3 @@ class GwcMasterHub {
     onDevicesChanged?.call();
   }
 }
-

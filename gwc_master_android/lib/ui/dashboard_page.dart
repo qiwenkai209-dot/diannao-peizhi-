@@ -7,7 +7,6 @@ import '../models/agent_device.dart';
 import 'theme.dart';
 import 'device_control_sheet.dart';
 import 'radar_scan_dialog.dart';
-import 'license_machine_page.dart';
 import 'central_control_doc_page.dart';
 
 class DashboardPage extends StatefulWidget {
@@ -174,16 +173,6 @@ class _DashboardPageState extends State<DashboardPage> {
               showDialog(
                 context: context,
                 builder: (ctx) => RadarScanDialog(masterHub: _masterHub),
-              );
-            },
-          ),
-          IconButton(
-            tooltip: '商业授权中枢',
-            icon: const Icon(Icons.verified_user, color: GwcTheme.accentAmber),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => LicenseMachinePage(masterHub: _masterHub)),
               );
             },
           ),
