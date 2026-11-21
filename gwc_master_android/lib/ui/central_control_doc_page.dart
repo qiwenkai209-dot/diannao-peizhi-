@@ -3,9 +3,9 @@ import '../core/central_control.dart';
 import 'theme.dart';
 
 class CentralControlDocPage extends StatelessWidget {
-  final CentralControlManager centralManager;
+  final CentralControlManager? centralManager;
 
-  const CentralControlDocPage({super.key, required this.centralManager});
+  const CentralControlDocPage({super.key, this.centralManager});
 
   @override
   Widget build(BuildContext context) {

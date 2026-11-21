@@ -137,7 +137,7 @@ class _DashboardPageState extends State<DashboardPage> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const CentralControlDocPage()),
+                MaterialPageRoute(builder: (_) => CentralControlDocPage(centralManager: _centralControl)),
               );
             },
           ),
