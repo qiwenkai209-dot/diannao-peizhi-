@@ -53,8 +53,11 @@ def main():
     # 确保 applicationId 为全新独立包名，彻底避开旧缓存
     new_app_id = 'applicationId "com.guowenchuang.master.app"'
     if "applicationId" in content:
-        content = re.sub(r'applicationId\s+["\'][^"\']+["\']', new_app_id, content)
+        content = re.sub(r'applicationId\s*=?\s*["\'][^"\']+["\']', new_app_id, content)
         print("[+] 成功将 applicationId 锁定为全新独立包名: com.guowenchuang.master.app")
+    elif "defaultConfig {" in content:
+        content = content.replace("defaultConfig {", f"defaultConfig {{\n        {new_app_id}", 1)
+        print("[+] 成功向 defaultConfig 注入 applicationId: com.guowenchuang.master.app")
 
     # 注入 signingConfigs
     signing_snippet = """

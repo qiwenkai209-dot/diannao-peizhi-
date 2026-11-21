@@ -44,11 +44,17 @@ jobs:
       - name: 初始化 Android 脚手架与全新独立包名 (com.guowenchuang.master.app)
         run: |
           cd gwc_master_android
-          mkdir -p /tmp/lib_bak
-          cp -r lib /tmp/lib_bak/
-          flutter create --org com.guowenchuang.master --project-name gwc_master_app --platforms android .
+          mkdir -p /tmp/gwc_bak
+          cp -r lib /tmp/gwc_bak/
+          cp pubspec.yaml /tmp/gwc_bak/
+          
+          # 创建原生 Android 脚手架并保持项目名称一致，避免覆盖 pubspec 依赖
+          flutter create --org com.guowenchuang.master --project-name gwc_master_android --platforms android .
+          
+          # 还原业务源码与依赖配置
           rm -rf lib
-          cp -r /tmp/lib_bak/lib .
+          cp -r /tmp/gwc_bak/lib .
+          cp /tmp/gwc_bak/pubspec.yaml .
 
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
@@ -57,7 +63,7 @@ jobs:
             sed -i 's/<application/<application android:usesCleartextTraffic="true"/' "$MANIFEST"
           fi
 
-          # 自动注入专属固化 Release 签名证书与包名锁定 (永久解决 APK 签名冲突报错)
+          # 自动注入专属固化 Release 签名证书与包名锁定 (锁定包名 com.guowenchuang.master.app，永久解决 APK 签名冲突报错)
           python3 release_signing/configure_signing.py
 
       - name: 获取 Flutter 项目依赖 (flutter pub get)
@@ -120,7 +126,7 @@ jobs:
           body: |
             ## 📱 展馆智能集群综合管控中心 · 移动主控端 (Android 版)
 
-            ### 🚀 最新修复与优化 (v2.2.3 彻底修复版):
+            ### 🚀 最新修复与优化 (v2.2.4 正式版):
             1. **【彻底解决签名不一致问题】**:
                - 全面切换为全新独立包名 `com.guowenchuang.master.app`！
                - 彻底避开并跳过手机系统中留存的任何历史旧版签名散列缓存，任何安卓手机/平板均可**直接一键极速安装，绝不冲突！**
