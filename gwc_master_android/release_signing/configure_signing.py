@@ -93,15 +93,22 @@ def main():
 
     print(f"[+] 成功注入 Release 签名配置至: {gradle_file}")
 
-    # 4. 修改 AndroidManifest.xml 桌面名称为【展馆智能集群主控端】
+    # 4. 配置应用桌面显示名称为【展馆智能集群主控端】(采用 strings.xml 标准资源，彻底杜绝 XML 编码异常)
+    res_values_dir = os.path.join(root_dir, "android", "app", "src", "main", "res", "values")
+    os.makedirs(res_values_dir, exist_ok=True)
+    strings_file = os.path.join(res_values_dir, "strings.xml")
+    strings_content = '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">展馆智能集群主控端</string>\n</resources>\n'
+    with open(strings_file, "w", encoding="utf-8") as f:
+        f.write(strings_content)
+
     manifest_file = os.path.join(root_dir, "android", "app", "src", "main", "AndroidManifest.xml")
     if os.path.exists(manifest_file):
         with open(manifest_file, "r", encoding="utf-8") as f:
             man_content = f.read()
-        man_content = re.sub(r'android:label="[^"]*"', 'android:label="展馆智能集群主控端"', man_content)
+        man_content = re.sub(r'android:label="[^"]*"', 'android:label="@string/app_name"', man_content)
         with open(manifest_file, "w", encoding="utf-8") as f:
             f.write(man_content)
-        print("[+] 成功更新 Android 桌面应用名称为: 展馆智能集群主控端")
+        print("[+] 成功更新 Android 桌面应用名称为: @string/app_name (展馆智能集群主控端)")
 
 if __name__ == "__main__":
     main()

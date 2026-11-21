@@ -98,6 +98,11 @@ class GwcMasterHub {
     onLogMessage?.call('[-] 主控端服务已安全停止');
   }
 
+  /// 向全馆广播 UDP 9887 探测与遥测指令
+  void broadcastProbe() {
+    _pollClusterTelemetry();
+  }
+
   /// 周期性向全馆广播轻量状态查询，驱动毫秒级状态回显
   void _pollClusterTelemetry() {
     if (_udpSocket == null) return;
