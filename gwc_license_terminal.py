@@ -413,17 +413,35 @@ class TerminalLicenseManager:
 
     def activate(self, act_code: str, force_overwrite: bool = True) -> tuple:
         """
-        激活或覆盖当前授权 (支持任意新授权覆盖)
+        激活或覆盖当前授权 (全面支持 16 位展馆控制终端专属算法与 12 位通用授权算法)
         返回 (success: bool, msg: str)
         """
         act_code = act_code.strip()
         dec = decode_activation_code(act_code)
+
+        # 若 16 位解析不通过，智能尝试 12 位通用 VisualCast 商业算法兼容
+        if not dec.get("valid"):
+            try:
+                import universal_license_core
+                dec_univ = universal_license_core.decode_license(act_code, "VisualCast")
+                if dec_univ.get("valid"):
+                    if (dec_univ["hw_hash"] & 0x0FFF) == (self.hw_hash & 0x0FFF):
+                        dec = {
+                            "valid": True,
+                            "hw_hash": self.hw_hash,
+                            "duration_seconds": -1,
+                            "duration_desc": "永久商业授权 (终身永久有效)",
+                            "duration_unit": "permanent"
+                        }
+            except Exception:
+                pass
+
         if not dec.get("valid"):
             return False, dec.get("error", "无效激活码")
 
         # 校验硬件指纹绑定
         if dec["hw_hash"] != self.hw_hash:
-            return False, "激活码与当前本机硬件指纹不匹配！"
+            return False, f"激活码与当前本机硬件指纹不匹配！(当前本机指纹: {self.hw_hash})"
 
         dur_sec = dec["duration_seconds"]
         now = time.time()
@@ -440,4 +458,5 @@ class TerminalLicenseManager:
             "algorithm": "EXHIBIT_PRO_2026"
         }
         self.save()
+        self.load()
         return True, f"授权成功！{dec['duration_desc']} 已生效！"

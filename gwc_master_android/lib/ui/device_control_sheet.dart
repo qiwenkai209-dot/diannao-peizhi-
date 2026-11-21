@@ -21,6 +21,7 @@ class DeviceControlSheet extends StatefulWidget {
 class _DeviceControlSheetState extends State<DeviceControlSheet> {
   late double _volume;
   late bool _isMuted;
+  bool _isAuthorizing = false;
   final TextEditingController _procNameController = TextEditingController();
 
   @override
@@ -86,7 +87,7 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
     );
   }
 
-  void _quickAuthorize() {
+  Future<void> _quickAuthorize() async {
     if (widget.device.requestCode.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('未获取到该设备的申请码，无法签发！')),
@@ -105,15 +106,40 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
     // 自动适配签发对应算法体系的永久商业激活码 (16位 或 12位)
     final actCode = LicenseManager.generateLicense(dec, authType: 'permanent');
 
-    widget.masterHub.sendCommand(
-      widget.device.ip,
-      'CMD_REMOTE_AUTH',
-      {'code': actCode},
-    );
+    setState(() => _isAuthorizing = true);
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('🎉 已向 [${widget.device.displayName}] 远程下发商业永久激活码: $actCode')),
+      SnackBar(
+        content: Text('正在向 [${widget.device.displayName}] 远程下发商业永久激活码并等待激活确认...'),
+        duration: const Duration(seconds: 2),
+      ),
     );
+
+    final res = await widget.masterHub.sendRemoteAuth(widget.device.ip, actCode);
+
+    if (!mounted) return;
+    setState(() => _isAuthorizing = false);
+
+    if (res['success'] == true) {
+      setState(() {
+        widget.device.isAuthorized = true;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: GwcTheme.accentGreen,
+          content: Text('🎉 工控机 [${widget.device.displayName}] 商业授权激活成功！\n激活码: $actCode\n终端已解锁。'),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: GwcTheme.accentRed,
+          content: Text('❌ 远程激活未生效: ${res["msg"] ?? "从机拒绝或未应答"}\n已生成激活码: $actCode\n可尝试手动在终端输入。'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
   }
 
   @override
@@ -277,9 +303,18 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                     backgroundColor: GwcTheme.accentAmber,
                     foregroundColor: Colors.black,
                   ),
-                  icon: const Icon(Icons.verified),
-                  label: const Text('一键签发永久商业授权并下发', style: TextStyle(fontWeight: FontWeight.bold)),
-                  onPressed: _quickAuthorize,
+                  icon: _isAuthorizing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                        )
+                      : const Icon(Icons.verified),
+                  label: Text(
+                    _isAuthorizing ? '正在下发授权并等待工控机确认...' : '一键签发永久商业授权并下发',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: _isAuthorizing ? null : _quickAuthorize,
                 ),
               ),
             const SizedBox(height: 24),

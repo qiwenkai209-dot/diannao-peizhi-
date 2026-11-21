@@ -57,6 +57,9 @@ jobs:
             sed -i 's/<application/<application android:usesCleartextTraffic="true"/' "$MANIFEST"
           fi
 
+          # 自动注入专属固化 Release 签名证书 (永久解决 APK 升级覆盖签名不一致报错)
+          python3 release_signing/configure_signing.py
+
       - name: 获取 Flutter 项目依赖 (flutter pub get)
         run: |
           cd gwc_master_android
@@ -90,6 +93,15 @@ jobs:
           name: 展馆智能集群主控端 Android 移动版 (方案A · 现代化触控中控)
           body: |
             ## 📱 展馆智能集群综合管控中心 · 移动主控端 (Android 版)
+
+            ### 🚀 最新修复与优化 (v2.2.1):
+            1. **解决覆盖安装“签名不一致”报错**:
+               - 集成官方固定 10000 天持久化 Release 签名密钥库 (`release.jks`)，保障所有后续更新版本证书哈希完全恒定，无缝覆盖安装升级。
+            2. **彻底解决商业授权签发后受控工控机仍锁止问题**:
+               - 新增 **UDP 9887 直连单播冗余下发通道**，突破工控机未主动反向建立 TCP 长连接导致的下发失效；
+               - 增加受控端真实双向 ACK 校验，主控严格等待受控工控机确认激活成功后再提示成功，杜绝虚假乐观提示；
+               - 受控端商业授权管理器增强：激活后即时重载本地持久化缓存，立即解锁前置锁止窗口并刷新所有卡片徽章；
+               - 兼容 16 位 2026 展馆控制终端专属算法与 12 位通用算法全场景授权。
 
             ### 🌟 核心特性说明:
             1. **现代化触控中控大厅 (Material 3 深色科技风)**:

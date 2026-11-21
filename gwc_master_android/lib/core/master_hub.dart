@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import '../models/agent_device.dart';
 import 'crypto.dart';
+import 'discovery.dart';
 
 /// 国文创展馆主控综合集群管理中心 (Dart 核心实现)
 class GwcMasterHub {
@@ -14,6 +15,7 @@ class GwcMasterHub {
   final Map<String, AgentDevice> _devices = {};
   final Map<String, Socket> _clientSockets = {};
   final Map<String, BytesBuilder> _recvBuffers = {};
+  final Map<String, Completer<Map<String, dynamic>>> _pendingAuthRequests = {};
 
   final void Function()? onDevicesChanged;
   final void Function(String eventLog)? onLogMessage;
@@ -151,6 +153,17 @@ class GwcMasterHub {
       dev.updateFromReport(payload);
       _devices[ip] = dev;
       onDevicesChanged?.call();
+    } else if (type == 'RESP_CMD_REMOTE_AUTH') {
+      // 收到工控机对远程授权的 TCP 响应确认
+      final ok = payload['success'] == true;
+      if (ok && _devices.containsKey(ip)) {
+        _devices[ip]!.isAuthorized = true;
+        onDevicesChanged?.call();
+      }
+      final completer = _pendingAuthRequests.remove(ip);
+      if (completer != null && !completer.isCompleted) {
+        completer.complete(payload);
+      }
     }
   }
 
@@ -172,6 +185,85 @@ class GwcMasterHub {
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /// 远程向工控机精准签发并下发商业授权 (双通道: TCP长连 + UDP 9887直连单播)
+  Future<Map<String, dynamic>> sendRemoteAuth(
+    String ip,
+    String actCode, {
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    final token = 'auth_${DateTime.now().millisecondsSinceEpoch}_${ip.replaceAll(".", "_")}';
+    final completer = Completer<Map<String, dynamic>>();
+    _pendingAuthRequests[ip] = completer;
+
+    // 通道 1: 如果有 TCP 长连接，通过 TCP 下发
+    final tcpSent = sendCommand(ip, 'CMD_REMOTE_AUTH', {
+      'code': actCode,
+      'token': token,
+    });
+
+    // 通道 2: 通过 UDP 9887 单播精准直达工控机
+    RawDatagramSocket? udpSocket;
+    try {
+      udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      final reqMap = {
+        'cmd': 'CMD_REMOTE_AUTH',
+        'code': actCode,
+        'token': token,
+        'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
+      };
+      final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(reqMap)}');
+      udpSocket.send(raw, InternetAddress(ip), GwcDiscovery.discoveryPort);
+
+      // 监听 UDP 单播回复 ACK
+      udpSocket.listen((event) {
+        if (event == RawSocketEvent.read) {
+          final dg = udpSocket?.receive();
+          if (dg != null) {
+            final text = utf8.decode(dg.data, allowMalformed: true);
+            if (text.startsWith(GwcDiscovery.discoveryMagic)) {
+              final jsonStr = text.substring(GwcDiscovery.discoveryMagic.length);
+              try {
+                final resp = jsonDecode(jsonStr) as Map<String, dynamic>;
+                if (resp['cmd'] == 'CMD_REMOTE_AUTH_ACK') {
+                  final ok = resp['success'] == true;
+                  if (ok && _devices.containsKey(ip)) {
+                    _devices[ip]!.isAuthorized = true;
+                    onDevicesChanged?.call();
+                  }
+                  if (!completer.isCompleted) {
+                    completer.complete(resp);
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+        }
+      });
+    } catch (e) {
+      onLogMessage?.call('[-] UDP 授权下发异常: $e');
+    }
+
+    try {
+      final res = await completer.future.timeout(timeout);
+      udpSocket?.close();
+      _pendingAuthRequests.remove(ip);
+      return res;
+    } on TimeoutException {
+      udpSocket?.close();
+      _pendingAuthRequests.remove(ip);
+      return {
+        'success': false,
+        'msg': tcpSent
+            ? '已通过 TCP 发送但工控机未在 ${timeout.inSeconds} 秒内返回确认'
+            : '工控机未响应 (未建立 TCP 连接且 UDP 直连未应答，请检查是否处于同一局域网)'
+      };
+    } catch (ex) {
+      udpSocket?.close();
+      _pendingAuthRequests.remove(ip);
+      return {'success': false, 'msg': '下发异常: $ex'};
     }
   }
 

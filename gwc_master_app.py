@@ -1807,18 +1807,30 @@ class MasterAppUI:
             return
 
         self.notice_var.set(f"正在向工控机 [{ip}] 远程签发【{desc}】授权...")
+
+        def _handle_auth_callback(resp):
+            def _update():
+                self._refresh_client_tree()
+                if resp and resp.get("success"):
+                    self.notice_var.set(f"工控机 [{ip}] 远程商业授权成功更新！")
+                    messagebox.showinfo(
+                        "授权成功",
+                        f"🎉 工控机 [{ip}] 远程商业授权成功！\n授权类型: {desc}\n专属激活码: {res.get('act_code')}\n受控端已自动无缝更新授权并解除锁定！"
+                    )
+                else:
+                    err_msg = (resp.get("msg") if resp else None) or (resp.get("error") if resp else None) or "终端未响应或硬件指纹不匹配"
+                    self.notice_var.set(f"工控机 [{ip}] 远程授权未生效: {err_msg}")
+                    messagebox.showerror(
+                        "授权失败",
+                        f"工控机 [{ip}] 远程授权未生效！\n原因: {err_msg}\n下发激活码: {res.get('act_code')}"
+                    )
+            self._safe_after(_update)
+
         res = self.master_hub.remote_authorize_agent(
             ip,
             auth_type=mode,
             custom_val=val,
-            callback=lambda r: self._safe_after(lambda: (
-                self._refresh_client_tree(),
-                self.notice_var.set(f"工控机 [{ip}] 远程商业授权成功更新！"),
-                messagebox.showinfo(
-                    "授权成功",
-                    f"🎉 工控机 [{ip}] 远程商业授权成功！\n授权类型: {desc}\n专属激活码: {res.get('act_code')}\n受控端已自动无缝更新授权并解除锁定！"
-                )
-            ))
+            callback=_handle_auth_callback
         )
         if not res.get("success"):
             messagebox.showerror("授权失败", res.get("error", "未知错误"))

@@ -19,6 +19,7 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
   String _generatedLic = '';
   int _selectedDuration = 0; // 0 为永久
   AgentDevice? _selectedDevice;
+  bool _isPushing = false;
 
   final Map<int, String> _durations = {
     12: '12 小时 (半天)',
@@ -74,7 +75,7 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
     });
   }
 
-  void _remotePush() {
+  Future<void> _remotePush() async {
     if (_generatedLic.isEmpty) return;
     if (_selectedDevice == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -83,15 +84,37 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
       return;
     }
 
-    widget.masterHub.sendCommand(
-      _selectedDevice!.ip,
-      'CMD_REMOTE_AUTH',
-      {'code': _generatedLic},
-    );
+    setState(() => _isPushing = true);
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('🎉 已向 [${_selectedDevice!.displayName}] 远程下发激活码！')),
+      SnackBar(
+        content: Text('正在向 [${_selectedDevice!.displayName}] 远程推送激活码...'),
+        duration: const Duration(seconds: 2),
+      ),
     );
+
+    final res = await widget.masterHub.sendRemoteAuth(_selectedDevice!.ip, _generatedLic);
+
+    if (!mounted) return;
+    setState(() => _isPushing = false);
+
+    if (res['success'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: GwcTheme.accentGreen,
+          content: Text('🎉 工控机 [${_selectedDevice!.displayName}] 商业授权激活成功！'),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: GwcTheme.accentRed,
+          content: Text('❌ 远程激活未生效: ${res["msg"] ?? "未响应"}\n激活码已生成，可在受控端手动粘贴。'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
   }
 
   @override
@@ -228,9 +251,15 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
                           Expanded(
                             child: ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(backgroundColor: GwcTheme.accentGreen),
-                              icon: const Icon(Icons.send, color: Colors.white),
-                              label: const Text('一键下发至从机', style: TextStyle(color: Colors.white)),
-                              onPressed: _remotePush,
+                              icon: _isPushing
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                    )
+                                  : const Icon(Icons.send, color: Colors.white),
+                              label: Text(_isPushing ? '正在下发...' : '一键下发至从机', style: const TextStyle(color: Colors.white)),
+                              onPressed: _isPushing ? null : _remotePush,
                             ),
                           ),
                         ],

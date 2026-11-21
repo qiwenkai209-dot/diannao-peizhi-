@@ -214,6 +214,41 @@ class AgentDiscoveryServer:
                                 if not getattr(self.agent_client, "running", False):
                                     self.agent_client.start()
 
+                    elif msg.get("cmd") == "CMD_REMOTE_AUTH":
+                        act_code = msg.get("code", "")
+                        resp_ok = False
+                        resp_msg = "未初始化授权管理器"
+                        lm = getattr(self.agent_client, "license_mgr", None)
+                        if not lm:
+                            try:
+                                import gwc_license_terminal as lt
+                                lm = lt.TerminalLicenseManager()
+                                if self.agent_client:
+                                    self.agent_client.license_mgr = lm
+                            except Exception as ex:
+                                resp_msg = f"初始化授权管理器失败: {ex}"
+
+                        if lm:
+                            resp_ok, resp_msg = lm.activate(act_code)
+                            if resp_ok:
+                                cb = getattr(self.agent_client, "on_remote_authorized", None)
+                                if cb:
+                                    try:
+                                        cb(act_code, resp_msg)
+                                    except Exception:
+                                        pass
+
+                        ack_data = {
+                            "cmd": "CMD_REMOTE_AUTH_ACK",
+                            "probe_token": msg.get("token", ""),
+                            "success": resp_ok,
+                            "msg": resp_msg,
+                            "act_code": act_code,
+                            "timestamp": time.time()
+                        }
+                        ack_raw = DISCOVERY_MAGIC + json.dumps(ack_data, ensure_ascii=False).encode("utf-8")
+                        self.sock.sendto(ack_raw, addr)
+
                 except socket.timeout:
                     continue
                 except Exception:
