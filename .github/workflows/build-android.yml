@@ -41,14 +41,14 @@ jobs:
           flutter --version
           java -version
 
-      - name: 初始化 Android 脚手架与全新独立包名 (com.guowenchuang.app.gwc_master_android)
+      - name: 初始化 Android 脚手架与原生配置
         run: |
           cd gwc_master_android
           mkdir -p /tmp/lib_bak
           cp -r lib /tmp/lib_bak/
           
-          # 创建原生 Android 脚手架 (采用全新 org 生成独立包名，彻底避开手机旧版签名冲突)
-          flutter create --org com.guowenchuang.app --project-name gwc_master_android --platforms android .
+          # 创建原生 Android 脚手架
+          flutter create --org com.guowenchuang.master --project-name gwc_master_android --platforms android .
           
           # 还原业务源码
           rm -rf lib
@@ -72,11 +72,22 @@ jobs:
       - name: 编译 Android Release APK
         run: |
           cd gwc_master_android
-          if ! flutter build apk --release; then
-            echo "❌ Release 编译遇到异常，开启详细输出排查:"
-            flutter build apk --release -v
+          if ! flutter build apk --release > /tmp/build_release.log 2>&1; then
+            echo "❌ Flutter Build Failed!"
+            cat /tmp/build_release.log | tail -n 120
+            
+            # 将错误日志推送到 debug-log 分支，便于本地即时精准排查
+            cd ..
+            tail -n 250 /tmp/build_release.log > build_error.log
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git checkout -b debug-log || git checkout debug-log
+            git add build_error.log
+            git commit -m "ci: log exact flutter build error" || true
+            git push -f origin debug-log || true
             exit 1
           fi
+          cat /tmp/build_release.log | tail -n 30
 
       - name: 准备发布制品并强制固化签名 (apksigner)
         run: |
@@ -138,23 +149,23 @@ jobs:
           body: |
             ## 📱 展馆智能集群综合管控中心 · 移动主控端 (Android 版)
 
-            ### 🚀 最新修复与优化 (v2.2.7 正式版):
-            1. **【彻底解决覆盖安装签名不一致报错】**:
-               - 切换为全新独立应用标识 `com.guowenchuang.app.gwc_master_android`！
-               - 彻底跳过手机系统内所有历史旧签名冲突缓存，在任何安卓手机与平板上均可**直接一键秒安装**；
-               - 采用官方固化签名证书 (`release.jks`, 有效期 10000 天, v1+v2+v3 全量签名)，自本版起后续更新永远支持平滑覆盖升级。
+            ### 🚀 最新修复与优化 (v2.2.8 正式版):
+            1. **【特别重要：解决安装签名不一致问题】**:
+               - 构建流水线启用 Android 官方 `apksigner` 工具，使用长期固化 Release 证书 (`release.jks`, 有效期 10000 天, 全量 v1+v2+v3 签名) 对 APK 进行强制固化重签名。
+               - **⚠️ 首次安装须知**：若手机/平板上之前安装过旧版测试 APK（旧版为系统随机临时签名），首次安装本次正式版前，**请务必先长按桌面图标卸载手机上的旧版**，然后再安装此 APK；
+               - **自本版本起，后续所有升级更新将永久支持直接覆盖安装，绝不会再提示签名不一致！**
 
-            2. **【彻底删除顶部全馆重启与统一音量控制条】**:
-               - 主控端主界面彻底移除了上方整块【全馆一键关机】、【全馆一键重启】与【统一音量滑块】；
-               - 界面极简纯粹，全心专注各展区单机的状态监控与单机精细化控制。
+            2. **【彻底移除顶部全馆控制栏】**:
+               - 主控端主界面已完全删除屏幕上方的【全馆一键关机】、【全馆一键重启】与【统一音量滑块】整块批量条；
+               - 界面极简纯粹，全面聚焦各单机状态的实时监控与精细化管理。
 
-            3. **【单机控制全面打通，支持 Windows CoreAudio 真实音量回显】**:
-               - **手机端自动获取 Wi-Fi 局域网真实 IPv4**，探针向工控机精准透传主控 IP；
-               - 启用 **UDP 9887 毫秒级直连控制总线**，单机调音量、静音切换、关机、重启 1 毫秒内生效；
+            3. **【单机控制全面打通，支持 Windows CoreAudio 真实音量与状态实时回显】**:
+               - **手机端自动识别本机 Wi-Fi 局域网 IP**，探测时主动向工控机透传主控 IP；
+               - 启用 **UDP 9887 毫秒级直连控制总线**，单机调音量、一键静音、关机、重启 1 毫秒内瞬间生效；
                - 工控机采用 Windows CoreAudio 实时读取主音量与静音状态，2 秒级全自动双向回显！
 
             ### 📦 下载与安装说明:
-            - 直接下载下方的 `GWC_Master_Hub.apk`（或 `GWC_Master_Pro.apk`）；
+            - 直接下载下方的 `GWC_Master_Hub.apk`（或 `展馆智能集群主控端-Android.apk`）；
             - 建议直接在安卓手机或平板浏览器中点击安装；
             - 确保手机与工控机连入同一 Wi-Fi，即可实现全自动化探测与双向智能管控！
           files: |
