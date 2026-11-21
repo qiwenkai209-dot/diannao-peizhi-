@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-自动化配置 Android Release 专属固定签名证书 (永久解决 APK 升级签名不一致问题)
+自动化配置 Android Release 专属固定签名证书与独立包名 (永久解决 APK 安装签名不一致问题)
 """
 import os
 import sys
@@ -15,7 +15,7 @@ def main():
     os.makedirs(android_app_dir, exist_ok=True)
     target_jks = os.path.join(android_app_dir, "release.jks")
     
-    # 1. 恢复 release.jks
+    # 1. 恢复 release.jks 固化签名证书
     src_jks = os.path.join(signing_dir, "release.jks")
     src_b64 = os.path.join(signing_dir, "release.jks.b64")
     
@@ -41,7 +41,7 @@ def main():
             f_out.write(f_in.read())
         print(f"[+] 成功配置 key.properties 至: {target_prop}")
 
-    # 3. 配置 android/app/build.gradle
+    # 3. 强制配置 android/app/build.gradle (包名切换为 com.guowenchuang.master.app + 固化 Release 签名)
     gradle_file = os.path.join(android_app_dir, "build.gradle")
     if not os.path.exists(gradle_file):
         print(f"[-] 警告: 未找到 {gradle_file}，请确保在 flutter create 后执行此脚本！")
@@ -49,6 +49,12 @@ def main():
 
     with open(gradle_file, "r", encoding="utf-8") as f:
         content = f.read()
+
+    # 确保 applicationId 为全新独立包名，彻底避开旧缓存
+    new_app_id = 'applicationId "com.guowenchuang.master.app"'
+    if "applicationId" in content:
+        content = re.sub(r'applicationId\s+["\'][^"\']+["\']', new_app_id, content)
+        print("[+] 成功将 applicationId 锁定为全新独立包名: com.guowenchuang.master.app")
 
     # 注入 signingConfigs
     signing_snippet = """
@@ -63,17 +69,15 @@ def main():
 """
 
     if "signingConfigs {" not in content:
-        # 在 buildTypes 前注入
         if "buildTypes {" in content:
             content = content.replace("buildTypes {", signing_snippet + "\n    buildTypes {", 1)
         else:
-            # 在 android { 之后注入
             content = re.sub(r"(android\s*\{)", r"\1" + signing_snippet, content, count=1)
     else:
         if "gwc_master_key" not in content:
             content = content.replace("signingConfigs {", "signingConfigs {\n        release {\n            keyAlias 'gwc_master_key'\n            keyPassword 'gwc2026secure'\n            storeFile file('release.jks')\n            storePassword 'gwc2026secure'\n        }", 1)
 
-    # 确保 release buildTypes 使用 release 签名
+    # 确保 release buildTypes 强制使用 release 签名
     content = re.sub(
         r"(release\s*\{[^\}]*?signingConfig\s*=?\s*)signingConfigs\.debug",
         r"\1signingConfigs.release",
@@ -86,6 +90,15 @@ def main():
 
     print(f"[+] 成功注入 Release 签名配置至: {gradle_file}")
 
+    # 4. 修改 AndroidManifest.xml 桌面名称为【展馆智能集群主控端】
+    manifest_file = os.path.join(root_dir, "android", "app", "src", "main", "AndroidManifest.xml")
+    if os.path.exists(manifest_file):
+        with open(manifest_file, "r", encoding="utf-8") as f:
+            man_content = f.read()
+        man_content = re.sub(r'android:label="[^"]*"', 'android:label="展馆智能集群主控端"', man_content)
+        with open(manifest_file, "w", encoding="utf-8") as f:
+            f.write(man_content)
+        print("[+] 成功更新 Android 桌面应用名称为: 展馆智能集群主控端")
+
 if __name__ == "__main__":
     main()
-

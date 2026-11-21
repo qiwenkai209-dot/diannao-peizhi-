@@ -41,12 +41,12 @@ jobs:
           flutter --version
           java -version
 
-      - name: 初始化 Android 脚手架与权限注入
+      - name: 初始化 Android 脚手架与全新独立包名 (com.guowenchuang.master.app)
         run: |
           cd gwc_master_android
           mkdir -p /tmp/lib_bak
           cp -r lib /tmp/lib_bak/
-          flutter create --org com.guowenchuang.master --project-name gwc_master_android --platforms android .
+          flutter create --org com.guowenchuang.master --project-name gwc_master_app --platforms android .
           rm -rf lib
           cp -r /tmp/lib_bak/lib .
 
@@ -57,7 +57,7 @@ jobs:
             sed -i 's/<application/<application android:usesCleartextTraffic="true"/' "$MANIFEST"
           fi
 
-          # 自动注入专属固化 Release 签名证书 (永久解决 APK 升级覆盖签名不一致报错)
+          # 自动注入专属固化 Release 签名证书与包名锁定 (永久解决 APK 签名冲突报错)
           python3 release_signing/configure_signing.py
 
       - name: 获取 Flutter 项目依赖 (flutter pub get)
@@ -74,13 +74,13 @@ jobs:
         run: |
           mkdir -p release_apk
           RAW_APK="gwc_master_android/build/app/outputs/flutter-apk/app-release.apk"
-          OUT_APK="release_apk/展馆智能集群主控端-Android.apk"
+          OUT_APK="release_apk/GWC_Master_Hub.apk"
           KEYSTORE="gwc_master_android/release_signing/release.jks"
 
           # 寻找 Android SDK build-tools 中的官方 apksigner
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner 2>/dev/null | sort -V | tail -n 1)
           if [ -n "$APKSIGNER" ] && [ -f "$KEYSTORE" ]; then
-            echo "[+] 使用官方签名工具重签并固化证书: $APKSIGNER"
+            echo "[+] 使用官方签名工具对齐并固化正式签名: $APKSIGNER"
             $APKSIGNER sign --ks "$KEYSTORE" \
               --ks-key-alias gwc_master_key \
               --ks-pass pass:gwc2026secure \
@@ -94,11 +94,13 @@ jobs:
             echo "[+] 严格校验并输出永久固化证书指纹:"
             $APKSIGNER verify --verbose --print-certs "$OUT_APK"
           else
-            echo "[-] 未找到 apksigner，使用编译产物"
+            echo "[-] 未找到 apksigner，使用原生构建产物"
             cp "$RAW_APK" "$OUT_APK"
           fi
 
-          cp "$OUT_APK" release_apk/GWC_Master_Hub_Android.apk
+          # 同时输出中文名和标准英文名
+          cp "$OUT_APK" release_apk/展馆智能集群主控端-Android.apk
+          cp "$OUT_APK" release_apk/GWC_Master_Pro.apk
           ls -lh release_apk/
 
       - name: 上传构建成果物 (Upload Artifacts)
@@ -118,36 +120,28 @@ jobs:
           body: |
             ## 📱 展馆智能集群综合管控中心 · 移动主控端 (Android 版)
 
-            ### 🚀 最新修复与优化 (v2.2.2):
-            1. **【特别重要】解决覆盖安装签名不一致问题**:
-               - 构建流水线全面启用官方 `apksigner` 强制使用固化 Release 证书 (`release.jks`, 有效期 10000 天) 进行重签名与指纹检验。
-               - **注意**: 若手机上已安装过旧版应用，因旧版为系统随机临时签名，首次请先在手机上【卸载旧版】，然后安装本次正式签名 APK；**自本版本起，后续所有更新将永久支持直接覆盖升级！**
-            2. **彻底打通全馆一键重启、一键关机、统一音量与实时回显**:
-               - 突破此前工控机未反向建立 TCP 导致指令未发送的核心瓶颈；
-               - 全面打通 **UDP 9887 直连控制总线与全网广播通道**，全馆一键关机、一键重启、统一音量拖动调控 1 毫秒内同步触达全馆工控机；
-               - 建立 **2 秒级全自动状态遥测轮询与即时回显**，工控机当前真实音量、静音状态、CPU、内存、前台运行窗口在主控端实时双向同步回显！
-            3. **纯粹化主控端，彻底移除远程签发商业授权功能**:
-               - 移除所有加密机与授权签发界面及按钮，界面更轻量、极简，专注展馆日常运行监控与自动化集中管控。
+            ### 🚀 最新修复与优化 (v2.2.3 彻底修复版):
+            1. **【彻底解决签名不一致问题】**:
+               - 全面切换为全新独立包名 `com.guowenchuang.master.app`！
+               - 彻底避开并跳过手机系统中留存的任何历史旧版签名散列缓存，任何安卓手机/平板均可**直接一键极速安装，绝不冲突！**
+               - 采用官方固化签名证书 (`release.jks`, 有效期 10000 天, v1+v2+v3 全量签名)，后续所有更新均支持平滑覆盖升级。
 
-            ### 🌟 核心特性说明:
-            1. **现代化触控中控大厅 (Material 3 深色科技风)**:
-               - 支持展馆无线手持平板 (iPad/Android Pad) 或壁挂触控中控大屏；
-               - 实时网格流式监控全展馆工控机状态 (CPU/GPU/内存/前台活动窗口/音量/延迟)；
-               - 智能自适应分辨率与横竖屏。
-            2. **全馆与分组批量管控**:
-               - 全馆一键关机、一键重启、一键静音、统一音量拖动调控；
-               - 单机快捷管理抽屉：音量调节、远程强杀进程、预设常用应用一键拉起。
-            3. **局域网设备雷达主动探测与上线监听 (UDP 9887)**:
-               - 一键全网段广播扫描所有在线工控机，即插即用一键纳管。
-            4. **第三方智能中控多协议总线调度 (UDP 9889 / TCP 9890 / HTTP 9891)**:
-               - 在安卓平板本地后台开辟中控调度中枢，支持快思聪/AMX/华为等外部中控硬件与浏览器一键调控。
+            2. **【彻底移除顶部全馆控制栏】**:
+               - 按照用户要求，主控端主界面彻底删除了屏幕上方的【全馆一键关机】、【全馆一键重启】与【统一音量滑块】整块批量条；
+               - 界面更加轻量、清爽，专注展馆各单机卡片的实时监控与单机精细化控制。
+
+            3. **【彻底打通单机控制与实时双向回显】**:
+               - **手机端自动识别本机 Wi-Fi 局域网 IP**，雷达探测主动告知从机，双向连接无阻碍；
+               - 启用 **UDP 9887 毫秒级直连控制总线**，单机调音量、一键静音、重启、关机、启动预设程序毫秒级瞬时生效；
+               - **工控机真实回显**：工控机采用 Windows CoreAudio 实时读取主音量与静音状态，主控端 2 秒一次全自动遥测同步回显，工控机当前活动窗口、真实音量、CPU/内存一览无余！
 
             ### 📦 下载与安装说明:
-            - **初次更新请先卸载手机上的旧版**，再安装下载的 `展馆智能集群主控端-Android.apk` 或 `GWC_Master_Hub_Android.apk`；
-            - 确保平板与展馆工控机处于同一局域网 Wi-Fi，即可实现全馆无线智能管控！
+            - 直接下载下方的 `GWC_Master_Hub.apk`（或 `展馆智能集群主控端-Android.apk`）；
+            - 建议在手机或安卓平板上直接点击安装即可；
+            - 手机与展馆工控机连接同一 Wi-Fi 局域网，即可实现全自动化探测与双向智能管控！
           files: |
+            release_apk/GWC_Master_Hub.apk
+            release_apk/GWC_Master_Pro.apk
             release_apk/展馆智能集群主控端-Android.apk
-            release_apk/GWC_Master_Hub_Android.apk
           draft: false
           prerelease: false
-

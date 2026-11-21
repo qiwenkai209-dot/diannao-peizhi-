@@ -14,6 +14,32 @@ class GwcDiscovery {
 
   GwcDiscovery({this.onDeviceDiscovered});
 
+  /// 获取手机本地局域网 Wi-Fi IPv4 地址
+  static Future<String> getLocalIp() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+      );
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (!addr.isLoopback &&
+              (addr.address.startsWith('192.168.') ||
+                  addr.address.startsWith('10.') ||
+                  addr.address.startsWith('172.'))) {
+            return addr.address;
+          }
+        }
+      }
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (!addr.isLoopback) return addr.address;
+        }
+      }
+    } catch (_) {}
+    return '';
+  }
+
   /// 启动后台被动监听上线宣告 (Beacon)
   Future<void> startBeaconListener() async {
     if (_isListening) return;
@@ -57,6 +83,10 @@ class GwcDiscovery {
     RawDatagramSocket? scanSocket;
 
     try {
+      if (localMasterIp.isEmpty) {
+        localMasterIp = await getLocalIp();
+      }
+
       scanSocket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         0, // 随机端口
@@ -70,7 +100,8 @@ class GwcDiscovery {
         'token': token,
         'master_ip': localMasterIp,
         'master_port': masterPort,
-        'auto_connect': autoConnect,
+        'auto_connect': true,
+        'force_reconnect': true,
         'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
       };
 

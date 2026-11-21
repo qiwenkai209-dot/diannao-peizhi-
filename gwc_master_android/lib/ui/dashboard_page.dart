@@ -22,7 +22,6 @@ class _DashboardPageState extends State<DashboardPage> {
   late CentralControlManager _centralControl;
   String _latestLog = '集群就绪，正在后台持续侦听受控工控机...';
   Timer? _refreshTimer;
-  double _batchVolume = 50.0;
 
   @override
   void initState() {
@@ -50,7 +49,7 @@ class _DashboardPageState extends State<DashboardPage> {
       },
     );
 
-    // 启动所有服务
+    // 启动所有后台总线服务
     _masterHub.start();
     _discovery.startBeaconListener();
     _centralControl.start();
@@ -70,7 +69,7 @@ class _DashboardPageState extends State<DashboardPage> {
     super.dispose();
   }
 
-  void _confirmBatch(String title, String content, VoidCallback onConfirm) {
+  void _confirmPower(String title, String content, VoidCallback onConfirm) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -95,79 +94,35 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  void _batchShutdown() {
-    _confirmBatch(
-      '⚠️ 全馆一键关机确认',
-      '确定要向全展馆所有在线工控机发送【一键关机】指令吗？工控机将全部安全关闭电源。',
-      () {
-        final cnt = _masterHub.broadcastCommand('CMD_SHUTDOWN', {'force': true, 'timeout': 0});
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已向全馆 $cnt 台工控机下发一键关机指令')),
-        );
-      },
-    );
-  }
-
-  void _batchReboot() {
-    _confirmBatch(
-      '🔄 全馆一键重启确认',
-      '确定要向全展馆所有在线工控机发送【一键重启】指令吗？',
-      () {
-        final cnt = _masterHub.broadcastCommand('CMD_REBOOT', {'force': true, 'timeout': 0});
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已向全馆 $cnt 台工控机下发一键重启指令')),
-        );
-      },
-    );
-  }
-
-  void _batchVolumeChange(double val) {
-    setState(() => _batchVolume = val);
-    _masterHub.broadcastCommand('CMD_VOLUME', {'action': 'set', 'level': val.toInt()});
-  }
-
   @override
   Widget build(BuildContext context) {
     final devices = _masterHub.devices;
-    final onlineCount = _masterHub.onlineCount;
 
     return Scaffold(
       appBar: AppBar(
         title: Row(
           children: [
+            const Icon(Icons.hub_outlined, color: GwcTheme.primary),
+            const SizedBox(width: 10),
+            const Text('展馆智能集群综合管控中心', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(width: 8),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(
                 color: GwcTheme.primary.withOpacity(0.15),
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: GwcTheme.primary.withOpacity(0.4)),
               ),
-              child: const Text(
-                '🏛️ 展馆智能集群综合管控中心 · 移动端',
-                style: TextStyle(color: GwcTheme.primary, fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-            ),
-            const SizedBox(width: 14),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: onlineCount > 0 ? GwcTheme.accentGreen.withOpacity(0.2) : Colors.white10,
-                borderRadius: BorderRadius.circular(12),
-              ),
               child: Text(
-                '在线: $onlineCount / ${devices.length} 台',
-                style: TextStyle(
-                  color: onlineCount > 0 ? GwcTheme.accentGreen : GwcTheme.textSecondary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                ),
+                '在线: ${_masterHub.onlineCount}/${devices.length}',
+                style: const TextStyle(fontSize: 12, color: GwcTheme.primary, fontWeight: FontWeight.bold),
               ),
             ),
           ],
         ),
         actions: [
           IconButton(
-            tooltip: '局域网雷达搜索',
+            tooltip: '一键雷达扫描',
             icon: const Icon(Icons.radar, color: GwcTheme.primary),
             onPressed: () {
               showDialog(
@@ -177,94 +132,64 @@ class _DashboardPageState extends State<DashboardPage> {
             },
           ),
           IconButton(
-            tooltip: '中控全协议手册',
-            icon: const Icon(Icons.menu_book, color: GwcTheme.secondary),
+            tooltip: '第三方中控协议指南',
+            icon: const Icon(Icons.code),
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => CentralControlDocPage(centralManager: _centralControl)),
+                MaterialPageRoute(builder: (_) => const CentralControlDocPage()),
               );
             },
           ),
-          const SizedBox(width: 8),
+          IconButton(
+            tooltip: '全网广播探测刷新',
+            icon: const Icon(Icons.refresh),
+            onPressed: () {
+              _masterHub.broadcastProbe();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  duration: Duration(milliseconds: 800),
+                  content: Text('已向局域网广播 UDP 9887 探测指令'),
+                ),
+              );
+            },
+          ),
         ],
       ),
       body: Column(
         children: [
-          // 顶部全馆批量快捷调度条
+          // 顶部集群状态与通信总线指示条（无全馆重启、无全馆关机、无全馆音量条）
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             color: GwcTheme.surface,
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: GwcTheme.accentRed.withOpacity(0.9),
-                        foregroundColor: Colors.white,
-                      ),
-                      icon: const Icon(Icons.power_settings_new, size: 18),
-                      label: const Text('全馆一键关机', style: TextStyle(fontWeight: FontWeight.bold)),
-                      onPressed: _batchShutdown,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: GwcTheme.background,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.notifications_active, size: 16, color: GwcTheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _latestLog,
+                      style: const TextStyle(fontSize: 12, color: GwcTheme.textSecondary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(width: 10),
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: GwcTheme.surfaceCard,
-                        foregroundColor: GwcTheme.secondary,
-                      ),
-                      icon: const Icon(Icons.refresh, size: 18),
-                      label: const Text('全馆一键重启'),
-                      onPressed: _batchReboot,
-                    ),
-                    const SizedBox(width: 14),
-                    const Text('🔊 统一音量:'),
-                    Expanded(
-                      child: Slider(
-                        value: _batchVolume,
-                        min: 0,
-                        max: 100,
-                        divisions: 100,
-                        activeColor: GwcTheme.primary,
-                        onChanged: _batchVolumeChange,
-                      ),
-                    ),
-                    Text('${_batchVolume.toInt()}%', style: const TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                // 实时调度跑马灯
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: GwcTheme.background,
-                    borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.notifications_active, size: 16, color: GwcTheme.primary),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _latestLog,
-                          style: const TextStyle(fontSize: 12, color: GwcTheme.textSecondary),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const Text(
-                        'TCP:9888 | UDP:9889 | TCP:9890 | HTTP:9891',
-                        style: TextStyle(fontSize: 11, color: Colors.white30),
-                      ),
-                    ],
+                  const Text(
+                    'TCP:9888 | UDP:9887 控制引擎',
+                    style: TextStyle(fontSize: 11, color: Colors.white30),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
 
-          // 工控机卡片列表 / 监控大厅
+          // 工控机卡片列表 / 监控大厅（用户专注于单机监控与控制）
           Expanded(
             child: devices.isEmpty
                 ? Center(
@@ -358,14 +283,14 @@ class _DashboardPageState extends State<DashboardPage> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                      color: dev.isAuthorized ? GwcTheme.accentGreen.withOpacity(0.2) : GwcTheme.accentAmber.withOpacity(0.2),
+                      color: isOnline ? GwcTheme.accentGreen.withOpacity(0.2) : Colors.white10,
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
-                      dev.isAuthorized ? '商业授权' : '未授权',
+                      isOnline ? '在线' : '离线',
                       style: TextStyle(
                         fontSize: 10,
-                        color: dev.isAuthorized ? GwcTheme.accentGreen : GwcTheme.accentAmber,
+                        color: isOnline ? GwcTheme.accentGreen : GwcTheme.textSecondary,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -374,7 +299,7 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
               const SizedBox(height: 6),
               Text(
-                'IP: ${dev.ip}   |   活动窗口: ${dev.activeWindow.isNotEmpty ? dev.activeWindow : "桌面/空闲"}',
+                'IP: ${dev.ip}   |   窗口: ${dev.activeWindow.isNotEmpty ? dev.activeWindow : "桌面/空闲"}',
                 style: const TextStyle(fontSize: 12, color: GwcTheme.textSecondary),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -392,10 +317,28 @@ class _DashboardPageState extends State<DashboardPage> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text('音量: ${dev.volume}%', style: const TextStyle(fontSize: 12, color: GwcTheme.textSecondary)),
+                  Row(
+                    children: [
+                      Icon(
+                        dev.isMuted ? Icons.volume_off : Icons.volume_up,
+                        size: 16,
+                        color: dev.isMuted ? GwcTheme.accentRed : GwcTheme.primary,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        dev.isMuted ? '静音' : '音量: ${dev.volume}%',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: dev.isMuted ? GwcTheme.accentRed : GwcTheme.textSecondary,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
                   Row(
                     children: [
                       IconButton(
+                        tooltip: '单机控制面板',
                         icon: const Icon(Icons.settings, size: 18, color: GwcTheme.primary),
                         onPressed: () {
                           showModalBottomSheet(
@@ -407,11 +350,12 @@ class _DashboardPageState extends State<DashboardPage> {
                         },
                       ),
                       IconButton(
+                        tooltip: '单机关机',
                         icon: const Icon(Icons.power_settings_new, size: 18, color: GwcTheme.accentRed),
                         onPressed: () {
-                          _confirmBatch(
-                            '关机确认',
-                            '确定远程关闭工控机 [${dev.displayName}] 吗？',
+                          _confirmPower(
+                            '单机关机确认',
+                            '确定远程关闭工控机 [${dev.displayName}] (${dev.ip}) 吗？',
                             () => _masterHub.sendCommand(dev.ip, 'CMD_SHUTDOWN', {'force': true, 'timeout': 0}),
                           );
                         },
@@ -451,4 +395,3 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 }
-
