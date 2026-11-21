@@ -1,4 +1,4 @@
-name: gwc_master_android
+name: gwc_master_pro
 description: 展馆智能集群综合管控中心 · 移动主控端 (Android)
 publish_to: 'none'
 version: 2.2.0+1
@@ -20,4 +20,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-
