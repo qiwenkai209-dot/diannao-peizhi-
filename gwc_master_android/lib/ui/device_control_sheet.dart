@@ -20,6 +20,7 @@ class DeviceControlSheet extends StatefulWidget {
 class _DeviceControlSheetState extends State<DeviceControlSheet> {
   late double _volume;
   late bool _isMuted;
+  bool _isDragging = false;
   final TextEditingController _procNameController = TextEditingController();
 
   @override
@@ -46,11 +47,19 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
 
   void _toggleMute() {
     setState(() => _isMuted = !_isMuted);
-    widget.masterHub.sendCommand(
-      widget.device.ip,
-      'CMD_VOLUME',
-      {'action': _isMuted ? 'mute' : 'unmute'},
-    );
+    if (_isMuted) {
+      widget.masterHub.sendCommand(
+        widget.device.ip,
+        'CMD_VOLUME',
+        {'action': 'mute'},
+      );
+    } else {
+      widget.masterHub.sendCommand(
+        widget.device.ip,
+        'CMD_VOLUME',
+        {'action': 'set', 'level': (_volume > 0 ? _volume.toInt() : 50)},
+      );
+    }
   }
 
   void _confirmPower(String title, String content, String cmd) {
@@ -90,11 +99,13 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
 
   @override
   Widget build(BuildContext context) {
-    // 动态同步工控机实时上报的音量与静音状态
-    if (_volume.toInt() != widget.device.volume) {
-      _volume = widget.device.volume.toDouble();
+    // 动态同步工控机实时上报的音量与静音状态 (拖动调节期间不被后台轮询打断覆盖)
+    if (!_isDragging) {
+      if (_volume.toInt() != widget.device.volume) {
+        _volume = widget.device.volume.toDouble();
+      }
+      _isMuted = widget.device.isMuted;
     }
-    _isMuted = widget.device.isMuted;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
@@ -154,35 +165,33 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
             const Divider(height: 24),
 
             // 前台活动窗口监控回显
-            if (widget.device.activeWindow.isNotEmpty) ...[
-              Card(
-                color: GwcTheme.surfaceCard,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.web_asset, size: 20, color: GwcTheme.primary),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('当前工控前台运行窗口:', style: TextStyle(color: GwcTheme.textSecondary, fontSize: 11)),
-                            Text(
-                              widget.device.activeWindow,
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
+            Card(
+              color: GwcTheme.surfaceCard,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.web_asset, size: 20, color: GwcTheme.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('当前工控前台运行窗口:', style: TextStyle(color: GwcTheme.textSecondary, fontSize: 11)),
+                          Text(
+                            widget.device.activeWindow.isNotEmpty ? widget.device.activeWindow : '系统桌面 / 待机空闲',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 12),
-            ],
+            ),
+            const SizedBox(height: 12),
 
             // 快捷音量调控
             Card(
@@ -230,7 +239,19 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
                             max: 100,
                             divisions: 100,
                             activeColor: GwcTheme.primary,
-                            onChanged: _sendVolume,
+                            onChangeStart: (val) {
+                              setState(() => _isDragging = true);
+                            },
+                            onChanged: (val) {
+                              setState(() => _volume = val);
+                            },
+                            onChangeEnd: (val) {
+                              setState(() {
+                                _volume = val;
+                                _isDragging = false;
+                              });
+                              _sendVolume(val);
+                            },
                           ),
                         ),
                       ],

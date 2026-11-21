@@ -103,25 +103,38 @@ class GwcMasterHub {
     _pollClusterTelemetry();
   }
 
-  /// 周期性向全馆广播轻量状态查询，驱动毫秒级状态回显
-  void _pollClusterTelemetry() {
+  /// 周期性向全馆广播轻量状态查询与自动联网宣告，驱动毫秒级状态回显与自动握手
+  void _pollClusterTelemetry() async {
     if (_udpSocket == null) return;
     try {
+      final localIp = await GwcDiscovery.getLocalIp();
+      final bcastAddrs = GwcDiscovery.getBroadcastAddresses(localIp);
+
       final probe = {
-        'cmd': 'CMD_GET_STATUS',
+        'cmd': 'DISCOVER_PROBE',
         'token': 'poll_${DateTime.now().millisecondsSinceEpoch}',
+        'master_ip': localIp,
         'master_port': defaultMasterPort,
+        'auto_connect': true,
+        'force_reconnect': true,
         'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
       };
       final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(probe)}');
 
-      // 1. 全网广播
-      _udpSocket?.send(raw, InternetAddress('255.255.255.255'), GwcDiscovery.discoveryPort);
+      // 1. 全网广播与子网定向广播并发发送
+      for (final bcast in bcastAddrs) {
+        try {
+          _udpSocket?.send(raw, InternetAddress(bcast), GwcDiscovery.discoveryPort);
+        } catch (_) {}
+      }
 
-      // 2. 对已记录的所有设备 IP 精准单播
+      // 2. 对已记录的所有设备 IP 精准单播探测
       for (final dev in _devices.values) {
         try {
-          _udpSocket?.send(raw, InternetAddress(dev.ip), GwcDiscovery.discoveryPort);
+          final targetIp = dev.ip.trim();
+          if (targetIp.isNotEmpty && targetIp != '127.0.0.1') {
+            _udpSocket?.send(raw, InternetAddress(targetIp), GwcDiscovery.discoveryPort);
+          }
         } catch (_) {}
       }
     } catch (_) {}
@@ -137,9 +150,10 @@ class GwcMasterHub {
       final msg = jsonDecode(jsonStr) as Map<String, dynamic>;
       final info = (msg['info'] as Map<String, dynamic>?) ?? msg;
 
-      final ip = (info['ip'] as String?)?.isNotEmpty == true
-          ? info['ip'] as String
-          : remoteIp;
+      // 始终优先使用真实的物理来源 IP，彻底防止 127.0.0.1 覆盖真实局域网 IP
+      final ip = (remoteIp.isNotEmpty && remoteIp != '127.0.0.1')
+          ? remoteIp
+          : ((info['ip'] as String?)?.isNotEmpty == true ? info['ip'] as String : remoteIp);
 
       final dev = _devices[ip] ?? AgentDevice(ip: ip, source: 'udp');
       dev.updateFromReport(info);
@@ -246,45 +260,124 @@ class GwcMasterHub {
     onDevicesChanged?.call();
   }
 
-  /// 向单个指定工控机下发指令 (双通道并发下发: TCP + UDP 9887 直连单播，毫秒级必达)
+  /// 向单个指定工控机下发指令 (全域多通道协同并发: TCP + UDP 9887 直连三突发 + UDP 9889 中控总线 + 广播兜底)
   bool sendCommand(String ip, String cmd, Map<String, dynamic> payload) {
+    final targetIp = ip.trim();
+    if (targetIp.isEmpty) return false;
+
     var sentSuccess = false;
 
-    // 1. 本地先行乐观更新，音量与控制即时回显
-    if (_devices.containsKey(ip)) {
+    // 1. 本地先行乐观即时更新
+    if (_devices.containsKey(targetIp)) {
       if (cmd == 'CMD_VOLUME') {
         if (payload['action'] == 'set' && payload.containsKey('level')) {
-          _devices[ip]!.volume = (payload['level'] as num).toInt();
-          _devices[ip]!.isMuted = false;
+          _devices[targetIp]!.volume = (payload['level'] as num).toInt();
+          _devices[targetIp]!.isMuted = false;
         } else if (payload['action'] == 'mute') {
-          _devices[ip]!.isMuted = true;
+          _devices[targetIp]!.isMuted = true;
         } else if (payload['action'] == 'unmute') {
-          _devices[ip]!.isMuted = false;
+          _devices[targetIp]!.isMuted = false;
         }
       }
       onDevicesChanged?.call();
     }
 
-    // 2. 通道一：TCP 长连接（若存在）
-    final socket = _clientSockets[ip];
+    // 2. 通道一：TCP 长连接 (毫秒级必达)
+    Socket? socket = _clientSockets[targetIp];
+    if (socket == null) {
+      for (final s in _clientSockets.values) {
+        if (s.remoteAddress.address == targetIp) {
+          socket = s;
+          break;
+        }
+      }
+    }
     if (socket != null) {
       try {
         final packet = GwcCrypto.packPacket(cmd, payload);
         socket.add(packet);
         sentSuccess = true;
+        onLogMessage?.call('[+] TCP 指令下发成功 [$targetIp]: $cmd');
       } catch (_) {}
     }
 
-    // 3. 通道二：UDP 9887 直连单播直达工控机
+    // 3. 通道二：UDP 9887 工控受控端直连单播 (三连发抗弱网丢包)
     try {
       final udpMsg = {
         'cmd': cmd,
+        'target_ip': targetIp,
         ...payload,
         'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
       };
       final raw = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(udpMsg)}');
-      _udpSocket?.send(raw, InternetAddress(ip), GwcDiscovery.discoveryPort);
+      final targetAddr = InternetAddress(targetIp);
+
+      // 第 1 连发 (即刻)
+      _udpSocket?.send(raw, targetAddr, GwcDiscovery.discoveryPort);
+      // 第 2 连发 (延迟 35ms)
+      Future.delayed(const Duration(milliseconds: 35), () {
+        try {
+          _udpSocket?.send(raw, targetAddr, GwcDiscovery.discoveryPort);
+        } catch (_) {}
+      });
+      // 第 3 连发 (延迟 80ms)
+      Future.delayed(const Duration(milliseconds: 80), () {
+        try {
+          _udpSocket?.send(raw, targetAddr, GwcDiscovery.discoveryPort);
+        } catch (_) {}
+      });
+
+      // 如果是解除静音，针对部分仅支持 set 恢复音量的旧版受控端进行自动 set 注入
+      if (cmd == 'CMD_VOLUME' && payload['action'] == 'unmute') {
+        final setVolMsg = {
+          'cmd': 'CMD_VOLUME',
+          'action': 'set',
+          'level': _devices[targetIp]?.volume ?? 50,
+          'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
+        };
+        final rawSet = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(setVolMsg)}');
+        _udpSocket?.send(rawSet, targetAddr, GwcDiscovery.discoveryPort);
+      }
+
       sentSuccess = true;
+    } catch (_) {}
+
+    // 4. 通道三：UDP 9889 展馆第三方智能中控多协议调度 (兼顾展馆主控/中控兼容机)
+    try {
+      Map<String, dynamic>? ctlJson;
+      if (cmd == 'CMD_SHUTDOWN') {
+        ctlJson = {'action': 'DEV_SHUTDOWN', 'ip': targetIp};
+      } else if (cmd == 'CMD_REBOOT') {
+        ctlJson = {'action': 'DEV_REBOOT', 'ip': targetIp};
+      } else if (cmd == 'CMD_VOLUME') {
+        if (payload['action'] == 'mute') {
+          ctlJson = {'action': 'DEV_MUTE', 'ip': targetIp};
+        } else if (payload['action'] == 'unmute') {
+          ctlJson = {'action': 'DEV_UNMUTE', 'ip': targetIp};
+        } else {
+          ctlJson = {'action': 'DEV_VOLUME', 'ip': targetIp, 'level': payload['level'] ?? 50};
+        }
+      } else if (cmd == 'CMD_RUN_APP') {
+        ctlJson = {'action': 'DEV_RUN', 'ip': targetIp, 'path': payload['path'] ?? ''};
+      }
+
+      if (ctlJson != null) {
+        final ctlRaw = utf8.encode(jsonEncode(ctlJson));
+        _udpSocket?.send(ctlRaw, InternetAddress(targetIp), 9889);
+        _udpSocket?.send(ctlRaw, InternetAddress('255.255.255.255'), 9889);
+      }
+    } catch (_) {}
+
+    // 5. 通道四：UDP 9887 全网广播单机定向兜底
+    try {
+      final bcastMsg = {
+        'cmd': cmd,
+        'target_ip': targetIp,
+        ...payload,
+        'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
+      };
+      final rawBcast = utf8.encode('${GwcDiscovery.discoveryMagic}${jsonEncode(bcastMsg)}');
+      _udpSocket?.send(rawBcast, InternetAddress('255.255.255.255'), GwcDiscovery.discoveryPort);
     } catch (_) {}
 
     return sentSuccess;
@@ -328,9 +421,28 @@ class GwcMasterHub {
     // 4. 通道三：对所有已知工控机 IP 逐一发送 UDP 单播补充
     for (final dev in _devices.values) {
       try {
-        _udpSocket?.send(raw, InternetAddress(dev.ip), GwcDiscovery.discoveryPort);
+        final tip = dev.ip.trim();
+        if (tip.isNotEmpty && tip != '127.0.0.1') {
+          _udpSocket?.send(raw, InternetAddress(tip), GwcDiscovery.discoveryPort);
+        }
       } catch (_) {}
     }
+
+    // 5. 通道四：UDP 9889 全馆中控多协议广播
+    try {
+      Map<String, dynamic>? ctlJson;
+      if (cmd == 'CMD_SHUTDOWN') {
+        ctlJson = {'action': 'ALL_SHUTDOWN'};
+      } else if (cmd == 'CMD_REBOOT') {
+        ctlJson = {'action': 'ALL_REBOOT'};
+      } else if (cmd == 'CMD_VOLUME') {
+        ctlJson = {'action': 'ALL_VOLUME', 'level': payload['level'] ?? 50};
+      }
+      if (ctlJson != null) {
+        final ctlRaw = utf8.encode(jsonEncode(ctlJson));
+        _udpSocket?.send(ctlRaw, InternetAddress('255.255.255.255'), 9889);
+      }
+    } catch (_) {}
 
     return targetCount;
   }

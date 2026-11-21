@@ -94,6 +94,55 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  void _showManualAddDialog() {
+    final ipController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: GwcTheme.surface,
+        title: const Text('手动直连工控机 IP', style: TextStyle(color: GwcTheme.primary, fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('输入展厅工控机或受控终端的局域网 IP (例如 192.168.1.123):', style: TextStyle(fontSize: 13, color: GwcTheme.textSecondary)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ipController,
+              decoration: const InputDecoration(
+                hintText: '192.168.1.123',
+                prefixIcon: Icon(Icons.lan, color: GwcTheme.primary),
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.datetime,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: GwcTheme.textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: GwcTheme.primary, foregroundColor: Colors.black),
+            onPressed: () {
+              final ip = ipController.text.trim();
+              if (ip.isNotEmpty) {
+                _masterHub.registerDiscoveredDevice(AgentDevice(ip: ip, customName: '展馆工控机 ($ip)'));
+                _masterHub.broadcastProbe();
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('已添加工控机 [$ip]，正在握手连接...')),
+                );
+              }
+            },
+            child: const Text('立即直连纳管'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final devices = _masterHub.devices;
@@ -130,6 +179,11 @@ class _DashboardPageState extends State<DashboardPage> {
                 builder: (ctx) => RadarScanDialog(masterHub: _masterHub),
               );
             },
+          ),
+          IconButton(
+            tooltip: '手动直连工控机 IP',
+            icon: const Icon(Icons.add_link, color: GwcTheme.secondary),
+            onPressed: _showManualAddDialog,
           ),
           IconButton(
             tooltip: '第三方中控协议指南',
@@ -299,7 +353,7 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
               const SizedBox(height: 6),
               Text(
-                'IP: ${dev.ip}   |   窗口: ${dev.activeWindow.isNotEmpty ? dev.activeWindow : "桌面/空闲"}',
+                'IP: ${dev.ip}   |   窗口: ${dev.activeWindow.isNotEmpty ? dev.activeWindow : "系统桌面 / 待机空闲"}',
                 style: const TextStyle(fontSize: 12, color: GwcTheme.textSecondary),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -346,6 +400,17 @@ class _DashboardPageState extends State<DashboardPage> {
                             isScrollControlled: true,
                             backgroundColor: Colors.transparent,
                             builder: (ctx) => DeviceControlSheet(device: dev, masterHub: _masterHub),
+                          );
+                        },
+                      ),
+                      IconButton(
+                        tooltip: '单机重启',
+                        icon: const Icon(Icons.refresh, size: 18, color: GwcTheme.secondary),
+                        onPressed: () {
+                          _confirmPower(
+                            '单机重启确认',
+                            '确定远程重启工控机 [${dev.displayName}] (${dev.ip}) 吗？',
+                            () => _masterHub.sendCommand(dev.ip, 'CMD_REBOOT', {'force': true, 'timeout': 0}),
                           );
                         },
                       ),

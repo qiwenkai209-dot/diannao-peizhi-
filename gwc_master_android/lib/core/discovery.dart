@@ -14,23 +14,37 @@ class GwcDiscovery {
 
   GwcDiscovery({this.onDeviceDiscovered});
 
-  /// 获取手机本地局域网 Wi-Fi IPv4 地址
+  /// 获取手机本地局域网 Wi-Fi IPv4 地址 (优先 wlan / wifi / eth / 192.168 / 10 / 172)
   static Future<String> getLocalIp() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLinkLocal: false,
       );
+      // 1. 优先查找明确的 Wi-Fi 或以太网接口
       for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          if (!addr.isLoopback &&
-              (addr.address.startsWith('192.168.') ||
-                  addr.address.startsWith('10.') ||
-                  addr.address.startsWith('172.'))) {
-            return addr.address;
+        final name = iface.name.toLowerCase();
+        if (name.contains('wlan') || name.contains('wifi') || name.contains('eth') || name.contains('en')) {
+          for (final addr in iface.addresses) {
+            if (!addr.isLoopback) return addr.address;
           }
         }
       }
+      // 2. 查找标准私有网段 (排除移动数据网络)
+      for (final iface in interfaces) {
+        final name = iface.name.toLowerCase();
+        if (!name.contains('rmnet') && !name.contains('pdp') && !name.contains('tun')) {
+          for (final addr in iface.addresses) {
+            if (!addr.isLoopback &&
+                (addr.address.startsWith('192.168.') ||
+                    addr.address.startsWith('10.') ||
+                    addr.address.startsWith('172.'))) {
+              return addr.address;
+            }
+          }
+        }
+      }
+      // 3. 通用兜底
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (!addr.isLoopback) return addr.address;
@@ -38,6 +52,21 @@ class GwcDiscovery {
       }
     } catch (_) {}
     return '';
+  }
+
+  /// 获取包含通用广播与子网定向广播的地址列表 (确保全网段抗弱网全覆盖)
+  static List<String> getBroadcastAddresses(String localIp) {
+    final list = <String>['255.255.255.255'];
+    if (localIp.isNotEmpty && localIp.contains('.')) {
+      final parts = localIp.split('.');
+      if (parts.length == 4) {
+        final subnetBcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+        if (!list.contains(subnetBcast)) {
+          list.add(subnetBcast);
+        }
+      }
+    }
+    return list;
   }
 
   /// 启动后台被动监听上线宣告 (Beacon)

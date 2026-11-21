@@ -75,10 +75,13 @@ class AgentDevice {
     } else if (data.containsKey('mem')) {
       mem = (data['mem'] as num).toDouble();
     }
-    if (data.containsKey('foreground_window') && (data['foreground_window'] as String?)?.isNotEmpty == true) {
-      activeWindow = data['foreground_window'] as String;
-    } else if (data.containsKey('active_window')) {
-      activeWindow = (data['active_window'] as String?) ?? '';
+    final fg = (data['foreground_window'] as String?) ?? (data['active_window'] as String?);
+    if (fg != null && fg.trim().isNotEmpty) {
+      activeWindow = fg.trim();
+    } else if (data.containsKey('visible_windows') &&
+        data['visible_windows'] is List &&
+        (data['visible_windows'] as List).isNotEmpty) {
+      activeWindow = (data['visible_windows'] as List).first.toString();
     }
     if (data.containsKey('authorized')) {
       isAuthorized = data['authorized'] == true;
