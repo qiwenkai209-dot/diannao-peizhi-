@@ -120,9 +120,13 @@ def encode_request_code(hw_hash: int = None, nonce: int = None) -> str:
 
 def decode_request_code(code_str: str) -> dict:
     """解析 8 位终端申请码"""
-    clean = re.sub(r"[^A-Za-z0-9]", "", code_str.upper())
+    m = re.search(r"([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4})[-_\s]?([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4})", (code_str or "").upper())
+    if m:
+        clean = m.group(1) + m.group(2)
+    else:
+        clean = re.sub(r"[^23456789ABCDEFGHJKLMNPQRSTUVWXYZ]", "", (code_str or "").upper())
     if len(clean) != 8:
-        return {"valid": False, "error": "申请码必须为 8 位"}
+        return {"valid": False, "error": f"申请码必须为 8 位有效字符，当前提取到 {len(clean)} 位"}
     for c in clean:
         if c not in CHAR_TO_VAL:
             return {"valid": False, "error": f"包含非法字符: {c}"}
@@ -229,9 +233,13 @@ def encode_activation_code(hw_hash: int, nonce: int, dur_code: int = 15, auth_ty
 
 def decode_activation_code(act_str: str) -> dict:
     """解析并校验 16 位激活码 (全面支持 自定义小时、自定义月、永久 及兼容模式)"""
-    clean = re.sub(r"[^A-Za-z0-9]", "", act_str.upper())
+    m = re.search(r"([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4})[-_\s]?([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4})[-_\s]?([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4})[-_\s]?([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4})", (act_str or "").upper())
+    if m:
+        clean = m.group(1) + m.group(2) + m.group(3) + m.group(4)
+    else:
+        clean = re.sub(r"[^23456789ABCDEFGHJKLMNPQRSTUVWXYZ]", "", (act_str or "").upper())
     if len(clean) != 16:
-        return {"valid": False, "error": "激活码必须为 16 位 (格式: XXXX-XXXX-XXXX-XXXX)"}
+        return {"valid": False, "error": f"激活码必须为 16 位 (格式: XXXX-XXXX-XXXX-XXXX)，当前提取到 {len(clean)} 位"}
     for c in clean:
         if c not in CHAR_TO_VAL:
             return {"valid": False, "error": f"激活码包含非法字符: {c}"}

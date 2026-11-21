@@ -32,3 +32,4 @@ class GwcMasterAndroidApp extends StatelessWidget {
     );
   }
 }
+

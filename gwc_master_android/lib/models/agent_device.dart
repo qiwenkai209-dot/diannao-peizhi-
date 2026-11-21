@@ -112,3 +112,4 @@ class AgentDevice {
         'last_seen': lastSeen.toIso8601String(),
       };
 }
+

@@ -94,7 +94,7 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
       return;
     }
 
-    final dec = UniversalLicenseCore.decodeRequestCode(widget.device.requestCode);
+    final dec = LicenseManager.decodeRequestCode(widget.device.requestCode);
     if (dec['valid'] != true) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('申请码解析失败: ${dec["error"]}')),
@@ -102,14 +102,8 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
       return;
     }
 
-    // 签发永久商业授权 (31)
-    final actCode = UniversalLicenseCore.encodeLicense(
-      dec['hw_hash'] as int,
-      dec['nonce'] as int,
-      31,
-      31,
-      productId: 'VisualCast',
-    );
+    // 自动适配签发对应算法体系的永久商业激活码 (16位 或 12位)
+    final actCode = LicenseManager.generateLicense(dec, authType: 'permanent');
 
     widget.masterHub.sendCommand(
       widget.device.ip,
@@ -295,3 +289,4 @@ class _DeviceControlSheetState extends State<DeviceControlSheet> {
     );
   }
 }
+

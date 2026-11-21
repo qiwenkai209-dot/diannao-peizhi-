@@ -17,17 +17,16 @@ class LicenseMachinePage extends StatefulWidget {
 class _LicenseMachinePageState extends State<LicenseMachinePage> {
   final TextEditingController _reqController = TextEditingController();
   String _generatedLic = '';
-  int _selectedDuration = 31; // 31 为永久
+  int _selectedDuration = 0; // 0 为永久
   AgentDevice? _selectedDevice;
 
   final Map<int, String> _durations = {
-    11: '12 小时 (半天)',
-    0: '1 天 (体验)',
-    1: '3 天 (试用)',
-    2: '7 天 (1周)',
-    4: '30 天 (1个月)',
-    8: '365 天 (1年)',
-    31: '♾️ 商业授权 (终身永久)',
+    12: '12 小时 (半天)',
+    24: '24 小时 (1天)',
+    72: '72 小时 (3天)',
+    30: '30 天 (1个月)',
+    365: '365 天 (1年)',
+    0: '♾️ 商业授权 (终身永久)',
   };
 
   void _generate() {
@@ -39,7 +38,7 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
       return;
     }
 
-    final dec = UniversalLicenseCore.decodeRequestCode(req);
+    final dec = LicenseManager.decodeRequestCode(req);
     if (dec['valid'] != true) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('申请码格式错误: ${dec["error"]}')),
@@ -47,12 +46,27 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
       return;
     }
 
-    final lic = UniversalLicenseCore.encodeLicense(
-      dec['hw_hash'] as int,
-      dec['nonce'] as int,
-      _selectedDuration,
-      31,
-      productId: 'VisualCast',
+    String authType = 'permanent';
+    int customVal = 0;
+
+    if (_selectedDuration == 12 || _selectedDuration == 24 || _selectedDuration == 72) {
+      authType = 'hour';
+      customVal = _selectedDuration;
+    } else if (_selectedDuration == 30) {
+      authType = 'month';
+      customVal = 1;
+    } else if (_selectedDuration == 365) {
+      authType = 'month';
+      customVal = 12;
+    } else {
+      authType = 'permanent';
+      customVal = 0;
+    }
+
+    final lic = LicenseManager.generateLicense(
+      dec,
+      authType: authType,
+      customVal: customVal,
     );
 
     setState(() {
@@ -168,7 +182,7 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
                           padding: const EdgeInsets.symmetric(vertical: 14),
                         ),
                         icon: const Icon(Icons.calculate),
-                        label: const Text('立即计算 12 位商业授权激活码', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        label: const Text('立即计算商业授权激活码', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                         onPressed: _generate,
                       ),
                     ),
@@ -184,7 +198,7 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
                   padding: const EdgeInsets.all(16),
                   child: Column(
                     children: [
-                      const Text('🎉 签发成功！12 位授权激活码:'),
+                      const Text('🎉 签发成功！商业授权激活码:'),
                       const SizedBox(height: 10),
                       SelectableText(
                         _generatedLic,
@@ -232,3 +246,4 @@ class _LicenseMachinePageState extends State<LicenseMachinePage> {
     );
   }
 }
+

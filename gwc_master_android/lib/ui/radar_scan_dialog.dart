@@ -192,3 +192,4 @@ class _RadarScanDialogState extends State<RadarScanDialog>
     );
   }
 }
+
