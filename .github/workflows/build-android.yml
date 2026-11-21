@@ -74,7 +74,13 @@ jobs:
       - name: 编译 Android Release APK
         run: |
           cd gwc_master_android
-          flutter build apk --release
+          flutter build apk --release --verbose 2>&1 | tee /tmp/flutter_build.log || {
+            echo "## ❌ Flutter Build Failed Log" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 120 /tmp/flutter_build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
 
       - name: 准备发布制品并强制固化签名 (apksigner)
         run: |
