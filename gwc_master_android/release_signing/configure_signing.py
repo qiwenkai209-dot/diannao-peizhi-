@@ -41,7 +41,7 @@ def main():
             f_out.write(f_in.read())
         print(f"[+] 成功配置 key.properties 至: {target_prop}")
 
-    # 3. 配置 android/app/build.gradle 固化 Release 签名
+    # 3. 配置 android/app/build.gradle
     gradle_file = os.path.join(android_app_dir, "build.gradle")
     if not os.path.exists(gradle_file):
         print(f"[-] 警告: 未找到 {gradle_file}，请确保在 flutter create 后执行此脚本！")
